@@ -179,3 +179,100 @@ def download_tlou_corpus(dest_dir: pathlib.Path = RAW_DIR) -> pathlib.Path:
         "TLOU corpus is a stretch goal. Assemble scripts manually and place under "
         f"{expected_path}"
     )
+
+
+# =============================================================================
+# 2. PREPROCESSING
+# =============================================================================
+
+def clean_wiki_markup(text: str) -> str:
+    """Strip MediaWiki markup, templates, infoboxes, and metadata from raw text.
+
+    Applied to all FandomCorpus and Tolkien Gateway documents before any
+    further processing. Should remove:
+        - {{template}} blocks
+        - [[wikilinks]] (keeping display text)
+        - [external links]
+        - HTML tags (<ref>, <gallery>, etc.)
+        - Category / File / Image prefixes
+        - Infobox table syntax
+
+    Args:
+        text: Raw wiki markup string.
+
+    Returns:
+        Clean plain-English prose string.
+    """
+    pass
+
+
+def prepare_pretraining_data(
+    dataset,
+    tokenizer: "Tokenizer",
+    out_path: pathlib.Path = PROCESSED_DIR / "pretrain.bin",
+) -> pathlib.Path:
+    """Tokenize the Gutenberg corpus and write a flat binary token file for pretraining.
+
+    Concatenates all documents with an EOS token between them, encodes with the
+    trained BPE tokenizer, and memory-maps the result to disk as a uint16 numpy
+    array for efficient streaming during training.
+
+    Args:
+        dataset:   HuggingFace Dataset returned by download_gutenberg_corpus().
+        tokenizer: Trained BPE Tokenizer (see train_bpe_tokenizer()).
+        out_path:  Destination .bin file.
+
+    Returns:
+        Path to the written binary token file.
+    """
+    pass
+
+
+def prepare_finetuning_data(
+    universe: str,
+    raw_path: pathlib.Path,
+    tokenizer: "Tokenizer",
+    out_path: pathlib.Path = None,
+) -> pathlib.Path:
+    """Clean, prepend universe control token, and tokenize a universe corpus for LoRA fine-tuning.
+
+    Cleans wiki markup (if applicable), prepends the universe control token
+    defined in UNIVERSES[universe]["control_token"], and writes a binary token
+    file analogous to the pretraining file.
+
+    Args:
+        universe:  Key from UNIVERSES (e.g. "star_wars").
+        raw_path:  Path to the raw dump file or directory.
+        tokenizer: Trained BPE Tokenizer.
+        out_path:  Destination .bin file. Defaults to data/processed/<universe>_finetune.bin.
+
+    Returns:
+        Path to the written binary token file.
+    """
+    if out_path is None:
+        out_path = PROCESSED_DIR / f"{universe}_finetune.bin"
+    pass
+
+
+def chunk_documents_for_rag(
+    documents: list[str],
+    tokenizer: "Tokenizer",
+    chunk_size: int = RAG_CHUNK_TOKENS,
+    overlap: int = RAG_CHUNK_OVERLAP,
+) -> list[str]:
+    """Split cleaned documents into overlapping token-bounded passages for RAG indexing.
+
+    Each passage is at most `chunk_size` tokens, with `overlap` tokens of
+    context carried over from the previous chunk to avoid splitting mid-thought.
+
+    Args:
+        documents:  List of clean plain-text strings (post clean_wiki_markup).
+        tokenizer:  Trained BPE Tokenizer used to measure token counts.
+        chunk_size: Maximum tokens per passage (default 256).
+        overlap:    Token overlap between consecutive passages (default 32).
+
+    Returns:
+        Flat list of passage strings ready for embedding.
+    """
+    pass
+
