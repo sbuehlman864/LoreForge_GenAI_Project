@@ -1,0 +1,27 @@
+LoreForge_PRD.md
+
+# Data
+data/
+
+# Checkpoints
+checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Node
+node_modules/
+
+# Env
+.env
+
+# OS
+.DS_Store
