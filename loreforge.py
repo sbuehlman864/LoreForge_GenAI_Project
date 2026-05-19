@@ -276,3 +276,147 @@ def chunk_documents_for_rag(
     """
     pass
 
+
+# =============================================================================
+# 3. TOKENIZER
+# =============================================================================
+
+def train_bpe_tokenizer(
+    texts,
+    vocab_size: int = 16_000,
+    save_path: pathlib.Path = TOKENIZER_PATH,
+) -> "Tokenizer":
+    """Train a BPE tokenizer on the combined pretraining + fine-tuning corpus.
+
+    Uses HuggingFace `tokenizers` with a Whitespace pre-tokenizer. Adds the
+    four universe control tokens as special tokens so they are never split.
+    Saves the trained tokenizer to disk.
+
+    Args:
+        texts:      Iterable of raw strings (Gutenberg + all universe corpora).
+        vocab_size: Target vocabulary size (default 16 000; tune as needed).
+        save_path:  Where to write the tokenizer JSON.
+
+    Returns:
+        Trained and saved Tokenizer object.
+    """
+    pass
+
+
+def load_tokenizer(path: pathlib.Path = TOKENIZER_PATH) -> "Tokenizer":
+    """Load a previously trained BPE tokenizer from disk.
+
+    Args:
+        path: Path to the tokenizer JSON saved by train_bpe_tokenizer().
+
+    Returns:
+        Tokenizer object ready for encode/decode.
+    """
+    return Tokenizer.from_file(str(path))
+
+
+# =============================================================================
+# 4. MODEL ARCHITECTURE
+# =============================================================================
+
+class CausalSelfAttention(nn.Module):
+    """Multi-head causal self-attention with an autoregressive mask.
+
+    Standard scaled dot-product attention where each position can only attend
+    to itself and earlier positions (upper-triangle mask). Supports optional
+    injection of LoRA delta weights on the Q and V projections.
+    """
+
+    def __init__(self, d_model: int, n_heads: int, context_len: int, dropout: float = 0.1):
+        """
+        Args:
+            d_model:     Model (embedding) dimension.
+            n_heads:     Number of attention heads. Must divide d_model evenly.
+            context_len: Maximum sequence length; used to register the causal mask.
+            dropout:     Attention dropout probability.
+        """
+        super().__init__()
+        pass
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (batch, seq_len, d_model).
+
+        Returns:
+            Output tensor of shape (batch, seq_len, d_model).
+        """
+        pass
+
+
+class TransformerBlock(nn.Module):
+    """A single decoder-only transformer block: LayerNorm → Attention → LayerNorm → FFN.
+
+    Uses pre-norm (norm before sublayer) following the GPT-2 convention.
+    FFN hidden dimension is 4 × d_model.
+    """
+
+    def __init__(self, d_model: int, n_heads: int, context_len: int, dropout: float = 0.1):
+        """
+        Args:
+            d_model:     Model dimension.
+            n_heads:     Number of attention heads.
+            context_len: Sequence length for causal mask.
+            dropout:     Dropout probability applied after attention and FFN.
+        """
+        super().__init__()
+        pass
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pass
+
+
+class LoreForgeTransformer(nn.Module):
+    """Decoder-only GPT-style transformer for causal language modeling.
+
+    Embedding → N × TransformerBlock → LayerNorm → LM head (tied weights).
+    Target: ~50M parameters with config (6L, 8H, 512D, 2048 ctx).
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int,
+        n_layers: int,
+        n_heads: int,
+        context_len: int,
+        dropout: float = 0.1,
+    ):
+        """
+        Args:
+            vocab_size:  Size of the BPE vocabulary (+ special tokens).
+            d_model:     Embedding dimension.
+            n_layers:    Number of stacked TransformerBlocks.
+            n_heads:     Attention heads per block.
+            context_len: Maximum sequence length (context window).
+            dropout:     Dropout probability throughout the model.
+        """
+        super().__init__()
+        pass
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        targets: torch.Tensor = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Run a forward pass and optionally compute cross-entropy loss.
+
+        Args:
+            input_ids: Token indices of shape (batch, seq_len).
+            targets:   Shifted token indices for loss computation (same shape).
+                       If None, only logits are returned.
+
+        Returns:
+            (logits, loss) where loss is None if targets is None.
+        """
+        pass
+
+    def count_parameters(self) -> int:
+        """Return the total number of trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
