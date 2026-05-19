@@ -420,3 +420,270 @@ class LoreForgeTransformer(nn.Module):
         """Return the total number of trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
+
+# =============================================================================
+# 5. PRETRAINING
+# =============================================================================
+
+class PretrainDataset(Dataset):
+    """Memory-mapped dataset over the flat binary token file produced by prepare_pretraining_data.
+
+    Streams (context_len + 1)-token windows from the file without loading the
+    full corpus into RAM — essential for large corpora on Quest.
+    """
+
+    def __init__(self, bin_path: pathlib.Path, context_len: int):
+        """
+        Args:
+            bin_path:    Path to the .bin token file.
+            context_len: Number of tokens per training sample (x = tokens[i:i+ctx],
+                         y = tokens[i+1:i+ctx+1]).
+        """
+        pass
+
+    def __len__(self) -> int:
+        pass
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        pass
+
+
+def build_lr_schedule(optimizer, warmup_steps: int, total_steps: int):
+    """Return a cosine decay scheduler with linear warmup.
+
+    Warmup increases LR from 0 to max_lr over `warmup_steps`, then cosine
+    decays to ~0 over the remaining steps.
+
+    Args:
+        optimizer:    The AdamW optimizer to wrap.
+        warmup_steps: Number of linear warmup steps.
+        total_steps:  Total number of training steps.
+
+    Returns:
+        A torch.optim.lr_scheduler.LambdaLR scheduler.
+    """
+    pass
+
+
+def train_one_epoch(
+    model: LoreForgeTransformer,
+    dataloader: DataLoader,
+    optimizer,
+    scheduler,
+    device: torch.device,
+    grad_clip: float = 1.0,
+) -> float:
+    """Run one full pass over the pretraining dataloader and return mean loss.
+
+    Args:
+        model:      The transformer model.
+        dataloader: Pretraining DataLoader.
+        optimizer:  AdamW optimizer.
+        scheduler:  LR scheduler (stepped per batch).
+        device:     torch.device ("cuda" or "cpu").
+        grad_clip:  Gradient norm clipping threshold.
+
+    Returns:
+        Mean cross-entropy loss over the epoch.
+    """
+    pass
+
+
+def pretrain(
+    model: LoreForgeTransformer,
+    bin_path: pathlib.Path,
+    context_len: int,
+    batch_size: int,
+    n_epochs: int,
+    lr: float,
+    warmup_steps: int,
+    device: torch.device,
+    checkpoint_dir: pathlib.Path = CHECKPOINTS_DIR,
+) -> LoreForgeTransformer:
+    """Full pretraining loop with checkpointing.
+
+    Saves a checkpoint after each epoch to checkpoint_dir/pretrain_epoch{n}.pt.
+
+    Args:
+        model:          Initialized LoreForgeTransformer.
+        bin_path:       Path to the pretraining token binary.
+        context_len:    Sequence length (must match model).
+        batch_size:     Samples per gradient step.
+        n_epochs:       Number of full passes over the corpus.
+        lr:             Peak learning rate for AdamW.
+        warmup_steps:   Linear warmup steps.
+        device:         Training device.
+        checkpoint_dir: Where to write epoch checkpoints.
+
+    Returns:
+        Trained model (weights updated in place; also returned for convenience).
+    """
+    pass
+
+
+def hyperband_search(
+    train_fn,
+    config_space: dict,
+    n_samples: int = 20,
+    max_epochs: int = 10,
+) -> dict:
+    """[STUB] Run a Hyperband search over pretraining hyperparameters using Ray Tune.
+
+    Ray Tune's ASHAScheduler implements Hyperband-style early stopping. It will
+    trial many (lr, batch_size, d_model, n_layers, n_heads, dropout) configs,
+    aggressively pruning poor runs and allocating more compute to promising ones.
+
+    Setup:
+        pip install ray[tune]
+
+    Expected usage:
+        best_config = hyperband_search(
+            train_fn=ray_train_wrapper,   # a function(config) → {"loss": float}
+            config_space={
+                "lr":        tune.loguniform(1e-4, 1e-2),
+                "batch_size": tune.choice([32, 64, 128]),
+                "d_model":   tune.choice([256, 512]),
+                "n_layers":  tune.choice([4, 6, 8]),
+                "n_heads":   tune.choice([4, 8]),
+                "dropout":   tune.uniform(0.05, 0.2),
+            },
+        )
+
+    Args:
+        train_fn:     A callable that accepts a config dict and reports metrics
+                      via ray.train.report({"loss": ...}).
+        config_space: Dict of Ray Tune search space objects defining the
+                      hyperparameter ranges to explore.
+        n_samples:    Number of total trials to run.
+        max_epochs:   Maximum epochs any single trial is allowed to run before
+                      Hyperband forces early stopping.
+
+    Returns:
+        Best config dict found (hyperparameter values that minimized loss).
+
+    Raises:
+        NotImplementedError: Until Ray Tune integration is wired up.
+    """
+    raise NotImplementedError("Wire up Ray Tune — see docstring for setup and usage.")
+
+
+# =============================================================================
+# 6. LoRA FINE-TUNING
+# =============================================================================
+
+class LoRALinear(nn.Module):
+    """A linear layer augmented with a low-rank LoRA delta: W' = W + (B @ A) * (alpha / r).
+
+    During fine-tuning only A and B are trained; W is frozen. At inference the
+    delta is merged or applied on the fly depending on the selected universe.
+    """
+
+    def __init__(self, linear: nn.Linear, rank: int = 8, alpha: float = 16.0):
+        """
+        Args:
+            linear: The frozen pretrained Linear layer to wrap.
+            rank:   LoRA rank r. Lower = fewer trainable params.
+            alpha:  LoRA scaling factor. Effective scale = alpha / rank.
+        """
+        super().__init__()
+        pass
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pass
+
+
+def apply_lora_adapters(
+    model: LoreForgeTransformer,
+    rank: int = 8,
+    alpha: float = 16.0,
+) -> LoreForgeTransformer:
+    """Replace Q and V projection layers in every attention block with LoRALinear wrappers.
+
+    Freezes all original parameters, then marks only the LoRA A/B matrices as
+    trainable. Call this before fine-tuning on a universe corpus.
+
+    Args:
+        model: Pretrained LoreForgeTransformer (weights will be frozen).
+        rank:  LoRA rank.
+        alpha: LoRA alpha scaling.
+
+    Returns:
+        The same model object with LoRA wrappers applied in place.
+    """
+    pass
+
+
+def finetune_lora(
+    model: LoreForgeTransformer,
+    universe: str,
+    bin_path: pathlib.Path,
+    context_len: int,
+    batch_size: int,
+    n_epochs: int,
+    lr: float,
+    device: torch.device,
+    checkpoint_dir: pathlib.Path = CHECKPOINTS_DIR,
+) -> LoreForgeTransformer:
+    """Fine-tune the LoRA adapters on a single universe corpus.
+
+    The base model weights stay frozen; only LoRA A/B matrices are updated.
+    Saves adapter weights (not full model) after each epoch to
+    checkpoint_dir/<universe>_lora_epoch{n}.pt.
+
+    Args:
+        model:          LoreForgeTransformer with LoRA adapters already applied.
+        universe:       Key from UNIVERSES (used for checkpoint naming).
+        bin_path:       Path to the universe fine-tuning token binary.
+        context_len:    Sequence length.
+        batch_size:     Samples per step.
+        n_epochs:       Fine-tuning epochs.
+        lr:             AdamW learning rate (typically smaller than pretraining lr).
+        device:         Training device.
+        checkpoint_dir: Where to save adapter checkpoints.
+
+    Returns:
+        Model with fine-tuned LoRA adapters.
+    """
+    pass
+
+
+def save_lora_adapter(
+    model: LoreForgeTransformer,
+    universe: str,
+    path: pathlib.Path = CHECKPOINTS_DIR,
+) -> pathlib.Path:
+    """Extract and save only the LoRA adapter weights for a given universe.
+
+    Saves a dict of {param_name: tensor} containing only A and B matrices so
+    the full model checkpoint does not need to be duplicated per universe.
+
+    Args:
+        model:    Model with LoRA adapters applied.
+        universe: Universe key — used to name the output file.
+        path:     Directory to write <universe>_lora.pt into.
+
+    Returns:
+        Path to the saved adapter file.
+    """
+    pass
+
+
+def load_lora_adapter(
+    model: LoreForgeTransformer,
+    universe: str,
+    path: pathlib.Path = CHECKPOINTS_DIR,
+) -> LoreForgeTransformer:
+    """Load saved LoRA adapter weights into a model that already has LoRA wrappers applied.
+
+    Call apply_lora_adapters() on the base model first, then this function to
+    restore the universe-specific A/B matrices.
+
+    Args:
+        model:    LoreForgeTransformer with LoRA wrappers (A/B initialized but untrained).
+        universe: Universe key — used to locate <universe>_lora.pt.
+        path:     Directory containing the adapter checkpoint.
+
+    Returns:
+        Model with the universe adapter weights loaded.
+    """
+    pass
