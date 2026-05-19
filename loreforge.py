@@ -687,3 +687,164 @@ def load_lora_adapter(
         Model with the universe adapter weights loaded.
     """
     pass
+
+
+# =============================================================================
+# 7. RAG
+# =============================================================================
+
+def embed_passages(
+    passages: list[str],
+    embed_model_name: str = RAG_EMBED_MODEL,
+    batch_size: int = 64,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+) -> np.ndarray:
+    """Embed a list of text passages using a sentence-transformer model.
+
+    Args:
+        passages:         List of clean passage strings from chunk_documents_for_rag().
+        embed_model_name: SentenceTransformer model name (default all-MiniLM-L6-v2).
+        batch_size:       Encoding batch size.
+        device:           Device for the embedding model.
+
+    Returns:
+        Float32 numpy array of shape (n_passages, embedding_dim).
+    """
+    pass
+
+
+def build_faiss_index(
+    universe: str,
+    passages: list[str],
+    embeddings: np.ndarray,
+    index_dir: pathlib.Path = INDICES_DIR,
+) -> pathlib.Path:
+    """Build and save a FAISS flat L2 index for a universe's passage embeddings.
+
+    Also saves a parallel JSON list of passage strings so retrieved embeddings
+    can be mapped back to readable text at inference time.
+
+    Args:
+        universe:    Universe key — used to name output files.
+        passages:    The raw passage strings (same order as embeddings rows).
+        embeddings:  (n_passages, dim) float32 array from embed_passages().
+        index_dir:   Directory to write <universe>.faiss and <universe>_passages.json.
+
+    Returns:
+        Path to the saved .faiss index file.
+    """
+    pass
+
+
+def load_faiss_index(
+    universe: str,
+    index_dir: pathlib.Path = INDICES_DIR,
+) -> tuple["faiss.Index", list[str]]:
+    """Load a FAISS index and its parallel passage list from disk.
+
+    Args:
+        universe:  Universe key.
+        index_dir: Directory containing <universe>.faiss and <universe>_passages.json.
+
+    Returns:
+        (faiss_index, passages) tuple.
+    """
+    pass
+
+
+def retrieve_context(
+    query: str,
+    universe: str,
+    faiss_index: "faiss.Index",
+    passages: list[str],
+    embed_model_name: str = RAG_EMBED_MODEL,
+    k: int = RAG_TOP_K,
+) -> list[str]:
+    """Embed a query and return the top-k most relevant lore passages.
+
+    Args:
+        query:            The user's story prompt (plain text).
+        universe:         Universe key (for logging / future per-universe model choice).
+        faiss_index:      Loaded FAISS index for the selected universe.
+        passages:         Parallel passage list returned by load_faiss_index().
+        embed_model_name: Embedding model to use (must match what built the index).
+        k:                Number of passages to retrieve.
+
+    Returns:
+        List of k passage strings, ordered by relevance (most relevant first).
+    """
+    pass
+
+
+# =============================================================================
+# 8. INFERENCE
+# =============================================================================
+
+def build_generation_prompt(
+    user_prompt: str,
+    retrieved_passages: list[str],
+    universe: str,
+) -> str:
+    """Assemble the full prompt sent to the model at generation time.
+
+    Format:
+        [UNIVERSE_TOKEN]
+        --- Lore Context ---
+        <passage 1>
+        <passage 2>
+        ...
+        --- Story ---
+        <user_prompt>
+
+    Args:
+        user_prompt:        The raw prompt entered by the user.
+        retrieved_passages: List of lore passages from retrieve_context().
+        universe:           Universe key (used to look up the control token).
+
+    Returns:
+        Formatted prompt string ready for tokenization and generation.
+    """
+    pass
+
+
+@torch.no_grad()
+def generate_story(
+    prompt: str,
+    universe: str,
+    model: LoreForgeTransformer,
+    tokenizer: "Tokenizer",
+    faiss_index: "faiss.Index",
+    passages: list[str],
+    max_new_tokens: int = 256,
+    temperature: float = 0.9,
+    top_k: int = 50,
+    device: torch.device = None,
+) -> dict:
+    """Run the full RAG + generation pipeline for a user prompt and universe.
+
+    Steps:
+        1. Retrieve top-k lore passages via retrieve_context().
+        2. Build the generation prompt via build_generation_prompt().
+        3. Tokenize the prompt.
+        4. Autoregressively sample up to max_new_tokens from the model.
+        5. Decode and return generated text + retrieved passages.
+
+    Args:
+        prompt:         User's story prompt.
+        universe:       Selected universe key.
+        model:          LoreForgeTransformer with the appropriate LoRA adapter loaded.
+        tokenizer:      Trained BPE Tokenizer.
+        faiss_index:    Loaded FAISS index for the selected universe.
+        passages:       Parallel passage strings for the selected universe.
+        max_new_tokens: Maximum tokens to generate beyond the prompt.
+        temperature:    Sampling temperature (higher = more creative).
+        top_k:          Top-k sampling cutoff (0 = disabled).
+        device:         Inference device. Defaults to model's current device.
+
+    Returns:
+        Dict with keys:
+            "generated_text":      The model's story continuation (decoded string).
+            "retrieved_passages":  The lore passages used as context.
+            "full_prompt":         The assembled prompt sent to the model.
+    """
+    pass
