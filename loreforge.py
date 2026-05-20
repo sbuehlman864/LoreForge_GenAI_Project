@@ -86,71 +86,147 @@ def download_gutenberg_corpus(split: str = "train") -> object:
     return dataset
 
 
-def download_fandom_corpus(universe: str, dest_dir: pathlib.Path = RAW_DIR) -> pathlib.Path:
-    """[STUB] Download a FandomCorpus preprocessed wiki dump for a given universe.
+def download_harry_potter_books(dest_dir: pathlib.Path = RAW_DIR) -> pathlib.Path:
+    """Download the Harry Potter books corpus from Kaggle.
 
-    FandomCorpus provides pre-cleaned XML dumps for Wookieepedia (Star Wars)
-    and the Harry Potter Wiki. Download the files manually from the URL below,
-    place them in dest_dir, and update the return path accordingly.
+    Downloads all seven books as plain .txt files via the Kaggle API.
+    Dataset: https://www.kaggle.com/datasets/rupanshukapoor/harry-potter-books
+    License: MIT (educational/research use only)
 
-    Manual steps:
-        1. Visit https://datamanagementlab.github.io/fandomCorpus/data.html
-        2. Locate the dump for `universe` ("star_wars" → Wookieepedia,
-           "harry_potter" → Harry Potter Wiki).
-        3. Download the .xml or .json archive and place it at:
-               data/raw/<universe>_fandom_dump.<ext>
-        4. Call prepare_finetuning_data(universe, ...) to continue.
+    Setup:
+        1. pip install kaggle
+        2. Create a Kaggle API token at https://www.kaggle.com/settings → API
+        3. Place the downloaded kaggle.json at ~/.kaggle/kaggle.json
+        4. chmod 600 ~/.kaggle/kaggle.json
 
     Args:
-        universe: One of the keys in UNIVERSES ("star_wars", "harry_potter").
-        dest_dir: Directory to store the raw download.
+        dest_dir: Directory to download and unzip the books into.
 
     Returns:
-        Expected path where the dump should be placed.
-
-    Raises:
-        NotImplementedError: Until manual download is complete.
+        Path to the directory containing the extracted .txt book files.
     """
-    expected_path = dest_dir / f"{universe}_fandom_dump"
-    raise NotImplementedError(
-        f"Download the FandomCorpus dump for '{universe}' manually from "
-        "https://datamanagementlab.github.io/fandomCorpus/data.html "
-        f"and place it at {expected_path}"
+    import kaggle
+    out_path = dest_dir / "harry_potter_books"
+    out_path.mkdir(parents=True, exist_ok=True)
+    kaggle.api.authenticate()
+    kaggle.api.dataset_download_files(
+        "rupanshukapoor/harry-potter-books",
+        path=str(out_path),
+        unzip=True,
     )
+    return out_path
 
 
-def export_tolkien_gateway(dest_dir: pathlib.Path = RAW_DIR) -> pathlib.Path:
-    """[STUB] Export the Tolkien Gateway wiki via MediaWiki Special:Export.
+def download_star_wars_corpus(split: str = "train") -> object:
+    """Download and filter Star Wars lore sentences from the Scifi_TV_Shows dataset.
 
-    Tolkien Gateway is licensed CC BY-SA 4.0. The full wiki can be exported
-    as an XML dump through the MediaWiki export interface.
+    Source: https://huggingface.co/datasets/lara-martin/Scifi_TV_Shows
+    License: CC-BY-4.0
+    Content: ~270 Star Wars stories (books + Rebels) scraped from the Star Wars
+    Fandom wiki, stored as prose sentences alongside structured event tuples.
 
-    Manual steps:
-        1. Visit https://tolkiengateway.net/w/index.php?title=Special:Export
-        2. Export all pages (or use the bulk export URL — see note below).
-        3. Save the resulting XML as: data/raw/lotr_tolkiengateway.xml
-        4. Call prepare_finetuning_data("lotr", ...) to continue.
-
-    Bulk export note:
-        For a full dump, prefer downloading from the site's database dumps page
-        if available, or use a MediaWiki scraper such as `wikiteam3` to crawl
-        all pages:
-            pip install wikiteam3
-            wikiteam3dumpgenerator --api https://tolkiengateway.net/w/api.php
+    The dataset has no explicit universe column, so Star Wars stories are
+    identified by filtering story_nums where at least one sentence contains
+    an unambiguous Star Wars keyword. All sentences from matching stories
+    are then collected, giving clean narrative prose for fine-tuning and RAG.
 
     Args:
-        dest_dir: Directory to store the raw XML dump.
+        split: Dataset split to load ("train", "validation", or "test").
 
     Returns:
-        Expected path where the dump should be placed.
-
-    Raises:
-        NotImplementedError: Until manual export is complete.
+        A HuggingFace Dataset object filtered to Star Wars stories only,
+        with all original columns preserved. Use the "sent" column for
+        raw prose text.
     """
-    expected_path = dest_dir / "lotr_tolkiengateway.xml"
-    raise NotImplementedError(
-        f"Export Tolkien Gateway manually (see docstring) and place the XML at {expected_path}"
-    )
+    # Unambiguous Star Wars terms unlikely to appear in other sci-fi shows
+    SW_KEYWORDS = {
+        "jedi", "sith", "lightsaber", "skywalker", "darth", "stormtrooper",
+        "x-wing", "tie fighter", "death star", "the force", "force user",
+        "millennium falcon", "rebel alliance", "galactic empire", "clone trooper",
+        "mandalorian", "wookiee", "coruscant", "tatooine", "dagobah",
+    }
+
+    dataset = load_dataset("lara-martin/Scifi_TV_Shows", split=split)
+
+    # Identify story numbers that contain at least one Star Wars sentence
+    sw_story_nums = set()
+    for row in dataset:
+        sent_lower = row["sent"].lower()
+        if any(kw in sent_lower for kw in SW_KEYWORDS):
+            sw_story_nums.add(row["story_num"])
+
+    # Keep all sentences belonging to identified Star Wars stories
+    sw_dataset = dataset.filter(lambda row: row["story_num"] in sw_story_nums)
+    return sw_dataset
+
+
+def download_lotr_books() -> object:
+    """Download the full Lord of the Rings trilogy text from HuggingFace.
+
+    Source: https://huggingface.co/datasets/jeremyarancio/lotr-book
+    Content: Pages 45–1055 of the LOTR trilogy as a single continuous text
+             block, with headers and footers stripped.
+    License: Unstated — Tolkien's work is copyrighted. Use for educational
+             and research purposes only.
+
+    Role in the pipeline:
+        FINE-TUNING — teaches the LoRA adapter Tolkien's actual prose style:
+        archaic diction, elevated register, elvish names and phrases, and the
+        specific narrative rhythm of Middle-earth. This is the style signal
+        that makes generated text feel like Tolkien rather than generic fantasy.
+
+    Returns:
+        A HuggingFace Dataset object with a single "text" column containing
+        the full trilogy as one string. Chunk and tokenize in
+        prepare_finetuning_data() before training.
+    """
+    dataset = load_dataset("jeremyarancio/lotr-book")
+    return dataset
+
+
+def download_lotr_wikipedia(split: str = "train") -> object:
+    """Download and filter LOTR-related articles from the Wikipedia HuggingFace dataset.
+
+    Source: https://huggingface.co/datasets/wikimedia/wikipedia (English, 20231101)
+    License: CC BY-SA 3.0
+
+    Role in the pipeline:
+        RAG — provides structured, encyclopedic lore entries for retrieval at
+        inference time. Wikipedia's LOTR coverage includes dedicated articles
+        for major characters (Frodo, Gandalf, Aragorn), locations (The Shire,
+        Mordor, Rivendell), factions, artifacts, and events. These read like
+        lore wiki entries, making them ideal context chunks: the model gets a
+        factual grounding passage and generates narrative prose around it.
+        This complements the book text (used for fine-tuning style) by
+        providing clean, retrievable facts rather than scattered narrative.
+
+    Args:
+        split: Dataset split to load (only "train" exists for Wikipedia).
+
+    Returns:
+        A HuggingFace Dataset object filtered to LOTR-related articles,
+        with columns: id, url, title, text. Use the "text" column for
+        chunking and embedding in build_faiss_index().
+    """
+    LOTR_KEYWORDS = {
+        "tolkien", "middle-earth", "lord of the rings", "the hobbit",
+        "silmarillion", "frodo", "gandalf", "aragorn", "sauron", "mordor",
+        "the shire", "rivendell", "rohan", "gondor", "mirkwood", "isengard",
+        "arda", "beleriand", "númenor", "numenor",
+    }
+
+    dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split=split)
+
+    # Filter by title first (fast), then fall back to text content for edge cases
+    def is_lotr_article(row):
+        title_lower = row["title"].lower()
+        if any(kw in title_lower for kw in LOTR_KEYWORDS):
+            return True
+        text_lower = row["text"][:500].lower()  # check only the lead paragraph
+        return sum(kw in text_lower for kw in LOTR_KEYWORDS) >= 2
+
+    lotr_dataset = dataset.filter(is_lotr_article)
+    return lotr_dataset
 
 
 def download_tlou_corpus(dest_dir: pathlib.Path = RAW_DIR) -> pathlib.Path:
