@@ -327,8 +327,22 @@ def prepare_pretraining_data(
     Returns:
         Path to the written binary token file.
     """
+    # ID EOS token
+    eos_id = tokenizer.token_to_id("[EOS]")
 
-    pass
+    # Loop over dataset, encode text, grab ids
+    all_tokens = []
+    for row in dataset:
+        ids = tokenizer.encode(row["text"]).ids
+        all_tokens.extend(ids)
+        all_tokens.append(eos_id)
+
+    # Convert text to numpy array and write to a file
+    arr = np.array(all_tokens, dtype=np.uint16)
+    arr.tofile(out_path)
+
+    return out_path
+
 
 
 def prepare_finetuning_data(
