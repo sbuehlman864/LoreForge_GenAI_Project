@@ -9,12 +9,14 @@
 # =============================================================================
 
 import os
+import re
 import json
 import math
 import time
 import shutil
 import pathlib
 import requests
+
 
 import numpy as np
 import torch
@@ -279,7 +281,31 @@ def clean_wiki_markup(text: str) -> str:
     Returns:
         Clean plain-English prose string.
     """
-    pass
+    # Strip {{}} blocks
+    while '{{' in text:
+        text = re.sub(r'\{\{[^{}]*\}\}', '', text)
+    
+    # Drop tags whose content should be removed entirely
+    text = re.sub(r'<(ref|gallery|math|score)[^>]*>.*?</\1>', '', text, flags=re.DOTALL)
+
+    # Strip all remaining HTML tags (keep the text between them)
+    text = re.sub(r'<[^>]+>', '', text)
+
+    text = re.sub(r'\[\[([^\]|]+)\|([^\]]+)\]\]', lambda m: m.group(2), text)  # [[target|display]] → display
+    text = re.sub(r'\[\[([^\]]+)\]\]', lambda m: m.group(1), text)              # [[target]] → target
+
+    text = re.sub(r'\[https?://[^\]]*\]', '', text)
+
+    text = re.sub(r'^\s*(\{\||\|\}|\|!?|!)[^\n]*', '', text, flags=re.MULTILINE) # Strip wiki table syntax
+
+    text = re.sub(r"'{2,3}", '', text)          # '''bold''' and ''italic''
+    text = re.sub(r'={2,6}[^=\n]+={2,6}', '', text)  # == Headings ==
+    text = re.sub(r'^\s*[*#:;]+', '', text, flags=re.MULTILINE)  # bullets and list markers
+
+    text = re.sub(r'\n{3,}', '\n\n', text)  # collapse 3+ blank lines to 2
+    text = text.strip()
+
+    return text
 
 
 def prepare_pretraining_data(
@@ -301,6 +327,7 @@ def prepare_pretraining_data(
     Returns:
         Path to the written binary token file.
     """
+
     pass
 
 
