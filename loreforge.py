@@ -444,7 +444,21 @@ def train_bpe_tokenizer(
     Returns:
         Trained and saved Tokenizer object.
     """
-    pass
+    # Create tokenizer and trainer
+    tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = Whitespace()
+
+    # Define our UNK and EOS tokens
+    special_tokens = ["[UNK]", "[EOS]"] + [v["control_token"] for v in UNIVERSES.values()]
+    trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens)
+
+    # Train tokenizer
+    tokenizer.train_from_iterator(texts, trainer=trainer)
+
+    # Save and return
+    tokenizer.save(str(save_path))
+    return tokenizer
+
 
 
 def load_tokenizer(path: pathlib.Path = TOKENIZER_PATH) -> "Tokenizer":
