@@ -385,7 +385,7 @@ def prepare_finetuning_data(
 
     arr = np.array(all_tokens, dtype=np.uint16)
     arr.tofile(out_path)
-    
+
     return out_path
 
 
@@ -410,7 +410,15 @@ def chunk_documents_for_rag(
     Returns:
         Flat list of passage strings ready for embedding.
     """
-    pass
+    chunks = []
+    for doc in documents:
+        ids = tokenizer.encode(doc).ids
+        step = chunk_size - overlap
+        for start in range(0, len(ids), step):
+            chunk_ids = ids[start : start + chunk_size]
+            chunks.append(tokenizer.decode(chunk_ids))
+    return chunks
+
 
 
 # =============================================================================
