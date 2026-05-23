@@ -366,9 +366,28 @@ def prepare_finetuning_data(
     Returns:
         Path to the written binary token file.
     """
-    if out_path is None:
-        out_path = PROCESSED_DIR / f"{universe}_finetune.bin"
-    pass
+    control_token = UNIVERSES[universe]["control_token"]
+    control_id = tokenizer.token_to_id(control_token)
+    eos_id = tokenizer.token_to_id("[EOS]")
+
+    if raw_path.is_dir():
+        texts = [f.read_text(encoding="utf-8") for f in raw_path.glob("*.txt")]
+    else:
+        texts = [raw_path.read_text(encoding="utf-8")]
+
+    all_tokens = []
+    for text in texts:
+        text = clean_wiki_markup(text)
+        ids = tokenizer.encode(text).ids
+        all_tokens.append(control_id)   # prepend control token
+        all_tokens.extend(ids)
+        all_tokens.append(eos_id)
+
+    arr = np.array(all_tokens, dtype=np.uint16)
+    arr.tofile(out_path)
+    
+    return out_path
+
 
 
 def chunk_documents_for_rag(
