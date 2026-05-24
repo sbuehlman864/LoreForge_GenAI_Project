@@ -494,6 +494,17 @@ class CausalSelfAttention(nn.Module):
             dropout:     Attention dropout probability.
         """
         super().__init__()
+        assert d_model % n_heads == 0
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False) # projects input to Q,K, and V
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+        # Causal mask of upper triangle of -inf so future positions masked out
+        mask = torch.triu(torch.full((context_len, context_len), float('-inf')), diagonal=1)
+        self.register_buffer("mask", mask)
         pass
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -504,7 +515,27 @@ class CausalSelfAttention(nn.Module):
         Returns:
             Output tensor of shape (batch, seq_len, d_model).
         """
-        pass
+        B, T, C = x.shape # batch, seq_len, d_model
+
+        # Project to Q,K,V and split
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+
+        # Reshape to (batch, n_heads, seq_len, head_dim)
+        def reshape(t):
+            return t.view(B,T, self.n_heads, self.head_dim).transpose(1,2)
+        
+        q, k, v = reshape(q), reshape(k), reshape(v)
+
+        # Scaled dot-product attention
+        scale = self.head_dim ** -0.5 # sqrt d_k
+        attention = (q @ k.transpose(-2,-1)) * scale
+        attention = attention + self.mask[:T,:T] # Apply causal mask
+        attention = torch.softmax(attention, dim=-1)
+        attention = self.dropout(attention)
+
+        # Combine heads and project out
+        output = (attention @ v).transpose(1,2).contiguous().view(B,T,C)
+        return self.out_proj(output)
 
 
 class TransformerBlock(nn.Module):
