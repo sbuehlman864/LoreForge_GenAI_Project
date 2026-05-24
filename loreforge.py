@@ -860,8 +860,26 @@ def hyperband_search(
     Raises:
         NotImplementedError: Until Ray Tune integration is wired up.
     """
+    scheduler = ASHAScheduler(
+        metric="loss",
+        mode="min",
+        max_t=max_epochs,
+        grace_period=1,
+        reduction_factor=2
+    )
 
-    raise NotImplementedError("Wire up Ray Tune — see docstring for setup and usage.")
+    tuner = tune.Tuner(
+        train_fn,
+        param_space=config_space,
+        tune_config=tune.TuneConfig(
+            num_samples=n_samples,
+            scheduler=scheduler
+        ),
+    )
+
+    results = tuner.fit()
+    best = results.get_best_result(metric="loss", mode="min")
+    return best.config
 
 
 # =============================================================================
