@@ -21,8 +21,13 @@ import requests
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, dataloader
 from torch.optim import AdamW
+
+import ray.train
+from ray import tune
+from ray.tune.schedulers import ASHAScheduler
+
 
 from datasets import load_dataset          # HuggingFace datasets
 from tokenizers import Tokenizer           # HuggingFace tokenizers (BPE)
@@ -790,6 +795,27 @@ def pretrain(
         torch.save(model.state_dict(), checkpoint_dir / f"pretrain_epoch{epoch}.pt")
     return model
 
+def ray_train_wrapper(config):
+    device = torch.devices("cuda" if torch.cuda.is_available() else "cpu")
+    
+    model = LoreForgeTransformer(
+        vocab_size=config["vocab_size"],
+        d_model=config["d_model"],
+        n_layers=config["n_layers"],
+        n_heads=config["n_heads"],
+        context_len=config["context_len"],
+        dropout=config["dropout"],
+    ).to(device)
+
+    dataset = PretrainDataset(config["bin_path"], config["context_len"])
+    dataloader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True)
+    total_steps = config["max_epochs"] * len(dataloader)
+    optimizer = AdamW(model.parameters(), lr=config["lr"])
+    scheduler = build_lr_schedule(optimizer, warmup_steps=100, total_steps=total_steps)
+
+    for epoch in range(config["max_epochs"]):
+        loss = train_one_epoch(model, dataloader, optimizer, scheduler, device)
+        ray.train.report({"loss": loss})
 
 def hyperband_search(
     train_fn,
@@ -834,6 +860,7 @@ def hyperband_search(
     Raises:
         NotImplementedError: Until Ray Tune integration is wired up.
     """
+
     raise NotImplementedError("Wire up Ray Tune — see docstring for setup and usage.")
 
 
