@@ -730,7 +730,22 @@ def train_one_epoch(
     Returns:
         Mean cross-entropy loss over the epoch.
     """
-    pass
+    model.train()
+    total_loss = 0.0
+
+    for x,y in dataloader:
+        x,y = x.to(device), y.to(device)
+    
+        optimizer.zero_grad()
+        _, loss = model(x,y)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
+        optimizer.step()
+        scheduler.step()
+        total_loss += loss.item()
+
+    return total_loss / len(dataloader)
 
 
 def pretrain(
