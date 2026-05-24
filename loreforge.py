@@ -796,7 +796,7 @@ def pretrain(
     return model
 
 def ray_train_wrapper(config):
-    device = torch.devices("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     model = LoreForgeTransformer(
         vocab_size=config["vocab_size"],
