@@ -505,7 +505,8 @@ class CausalSelfAttention(nn.Module):
         # Causal mask of upper triangle of -inf so future positions masked out
         mask = torch.triu(torch.full((context_len, context_len), float('-inf')), diagonal=1)
         self.register_buffer("mask", mask)
-        pass
+
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -554,10 +555,22 @@ class TransformerBlock(nn.Module):
             dropout:     Dropout probability applied after attention and FFN.
         """
         super().__init__()
-        pass
+
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attention = CausalSelfAttention(d_model, n_heads, context_len, dropout)
+        self.ln2 = nn.LayerNorm(d_model)
+
+        self.ffnn = nn.Sequential(
+            nn.Linear(d_model, 4 * d_model),
+            nn.GELU(), # Gaussian Error Linear Unit, smoother than ReLu 
+            nn.Linear(4*d_model, d_model),
+            nn.Dropout(dropout)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pass
+        x = x + self.attention(self.ln1(x))
+        x = x + self.ffnn(self.ln2(x))
+        return x
 
 
 class LoreForgeTransformer(nn.Module):
