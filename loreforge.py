@@ -606,6 +606,7 @@ class LoreForgeTransformer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.blocks = nn.ModuleList([
             TransformerBlock(d_model, n_heads, context_len, dropout)
+            for _ in range(n_layers)
         ])
         self.ln_final = nn.LayerNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
@@ -670,13 +671,18 @@ class PretrainDataset(Dataset):
             context_len: Number of tokens per training sample (x = tokens[i:i+ctx],
                          y = tokens[i+1:i+ctx+1]).
         """
-        pass
+        # Memory-map the binary file so only accessed parts loaded to RAM
+        self.data = np.memmap(bin_path, dtype=np.uint16, mode='r')
+        self.context_len = context_len
 
     def __len__(self) -> int:
-        pass
+        return len(self.data) - self.context_len
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        pass
+        chunk = torch.from_numpy(self.data[idx : idx + self.context_len + 1].astype(np.int64))
+        x = chunk[:-1] # all tokens except last
+        y = chunk[1:] # all tokens except the first (shifted by one)
+        return x, y
 
 
 def build_lr_schedule(optimizer, warmup_steps: int, total_steps: int):
@@ -693,7 +699,14 @@ def build_lr_schedule(optimizer, warmup_steps: int, total_steps: int):
     Returns:
         A torch.optim.lr_scheduler.LambdaLR scheduler.
     """
-    pass
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / max(1, warmup_steps)
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+    
+    from torch.optim.lr_scheduler import LambdaLR
+    return LambdaLR(optimizer, lr_lambda)
 
 
 def train_one_epoch(
