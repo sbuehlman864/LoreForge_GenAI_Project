@@ -777,7 +777,18 @@ def pretrain(
     Returns:
         Trained model (weights updated in place; also returned for convenience).
     """
-    pass
+    dataset = PretrainDataset(bin_path, context_len)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    optimizer = AdamW(model.parameters(), lr=lr)
+    total_steps = n_epochs * len(dataloader)
+    scheduler = build_lr_schedule(optimizer, warmup_steps, total_steps)
+    model = model.to(device)
+
+    for epoch in range(1, n_epochs  + 1):
+        loss = train_one_epoch(model, dataloader, optimizer, scheduler, device)
+        print(f"Epoch {epoch} loss: {loss:4.f}")
+        torch.save(model.state_dict(), checkpoint_dir / f"pretrain_epoch{epoch}.pt")
+    return model
 
 
 def hyperband_search(
