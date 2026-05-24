@@ -599,7 +599,19 @@ class LoreForgeTransformer(nn.Module):
             dropout:     Dropout probability throughout the model.
         """
         super().__init__()
-        pass
+
+        self.context_len = context_len
+        self.token_emb = nn.Embedding(vocab_size, d_model)
+        self.pos_emb = nn.Embedding(context_len, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(d_model, n_heads, context_len, dropout)
+        ])
+        self.ln_final = nn.LayerNorm(d_model)
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+
+        # Tie weights so token embedding and lm_head share same matrix
+        self.lm_head.weight = self.token_emb.weight
 
     def forward(
         self,
@@ -616,7 +628,24 @@ class LoreForgeTransformer(nn.Module):
         Returns:
             (logits, loss) where loss is None if targets is None.
         """
-        pass
+        B, T = input_ids.shape
+        positions = torch.arange(T, device=input_ids.device)
+
+        x = self.dropout(self.token_emb(input_ids) + self.pos_emb(positions))
+
+        for block in self.blocks:
+            x = block(x)
+        
+        x = self.ln_final(x)
+        logits = self.lm_head(x) # (B, T, vocab_size)
+
+        loss = None
+        if targets is not None:
+            loss = nn.functional.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1)
+            )
+        return logits, loss
 
     def count_parameters(self) -> int:
         """Return the total number of trainable parameters."""
