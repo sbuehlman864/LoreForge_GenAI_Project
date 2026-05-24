@@ -21,7 +21,7 @@ import requests
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader, dataloader
+from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
 import ray.train
@@ -791,7 +791,7 @@ def pretrain(
 
     for epoch in range(1, n_epochs  + 1):
         loss = train_one_epoch(model, dataloader, optimizer, scheduler, device)
-        print(f"Epoch {epoch} loss: {loss:4.f}")
+        print(f"Epoch {epoch} loss: {loss:.4f}")
         torch.save(model.state_dict(), checkpoint_dir / f"pretrain_epoch{epoch}.pt")
     return model
 
