@@ -901,10 +901,21 @@ class LoRALinear(nn.Module):
             alpha:  LoRA scaling factor. Effective scale = alpha / rank.
         """
         super().__init__()
+        self.linear = linear
+        self.rank = rank
+        self.scale = alpha / rank
+
+        in_features = linear.in_features
+        out_features = linear.out_features
+
+        self.lora_A = nn.Parameter(torch.empty(rank, in_features))
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
         pass
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pass
+        return (self.linear(x) + (x @ self.lora_A.T @ self.lora_B.T) * self.scale)
 
 
 def apply_lora_adapters(
@@ -926,7 +937,6 @@ def apply_lora_adapters(
         The same model object with LoRA wrappers applied in place.
     """
     pass
-
 
 def finetune_lora(
     model: LoreForgeTransformer,
