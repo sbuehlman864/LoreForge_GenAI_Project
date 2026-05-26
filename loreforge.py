@@ -1117,7 +1117,11 @@ def load_faiss_index(
     Returns:
         (faiss_index, passages) tuple.
     """
-    pass
+    idx = faiss.read_index(str(index_dir / f"{universe}.faiss"))
+    with open(index_dir / f"{universe}_passages.json") as f:
+        passages_list = json.load(f)
+
+    return(idx, passages_list)
 
 
 def retrieve_context(
