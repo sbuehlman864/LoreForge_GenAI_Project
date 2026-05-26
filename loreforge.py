@@ -1091,7 +1091,17 @@ def build_faiss_index(
     Returns:
         Path to the saved .faiss index file.
     """
-    pass
+    idx = faiss.IndexFlatL2(embeddings.shape[1])
+    idx.add(embeddings)
+
+    index_path = index_dir / f"{universe}.faiss"
+    faiss.write_index(idx, str(index_path))
+
+    passages_path = index_dir / f"{universe}_passages.json"
+    with open(passages_path, "w") as f:
+        json.dump(passages, f)
+
+    return index_path
 
 
 def load_faiss_index(
