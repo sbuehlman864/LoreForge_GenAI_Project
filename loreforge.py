@@ -1036,7 +1036,12 @@ def load_lora_adapter(
     Returns:
         Model with the universe adapter weights loaded.
     """
-    pass
+    out_path = path / f"{universe}_lora.pt"
+
+    adapter_weights = torch.load(out_path, weights_only=True)
+    model.load_state_dict(adapter_weights, strict=False)
+    return model
+
 
 
 # =============================================================================
