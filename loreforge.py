@@ -936,7 +936,13 @@ def apply_lora_adapters(
     Returns:
         The same model object with LoRA wrappers applied in place.
     """
-    pass
+    for param in model.parameters():
+        param.requires_grad = False
+    
+    for block in model.blocks:
+        block.attention.qkv = LoRALinear(block.attention.qkv , rank, alpha)
+        block.attention.out_proj = LoRALinear(block.attention.out_proj, rank, alpha)
+    return model
 
 def finetune_lora(
     model: LoreForgeTransformer,
