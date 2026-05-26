@@ -1065,7 +1065,10 @@ def embed_passages(
     Returns:
         Float32 numpy array of shape (n_passages, embedding_dim).
     """
-    pass
+    model = SentenceTransformer(embed_model_name, device=device)
+    result = model.encode(passages, batch_size=batch_size, convert_to_numpy=True)
+
+    return result.astype('float32')
 
 
 def build_faiss_index(
