@@ -1010,7 +1010,12 @@ def save_lora_adapter(
     Returns:
         Path to the saved adapter file.
     """
-    pass
+    adapter_weights = {
+        k: v for k, v in model.state_dict().items() if "lora_" in k
+    }
+    out_path = path / f"{universe}_lora.pt"
+    torch.save(adapter_weights, out_path)
+    return out_path
 
 
 def load_lora_adapter(
