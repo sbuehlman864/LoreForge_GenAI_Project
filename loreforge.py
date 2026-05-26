@@ -975,7 +975,21 @@ def finetune_lora(
     Returns:
         Model with fine-tuned LoRA adapters.
     """
-    pass
+    dataset = PretrainDataset(bin_path, context_len)
+    dataloader = DataLoader(dataset, batch_size, shuffle=True)
+
+    optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
+    scheduler = build_lr_schedule(optimizer, warmup_steps=100, total_steps=n_epochs * len(dataloader))
+
+    model.to(device)
+    for epoch in range(1, n_epochs + 1):
+        loss = train_one_epoch(model, dataloader, optimizer, scheduler, device)
+        print(f"Epoch {epoch} loss: {loss : .4f}")
+
+        save_lora_adapter(model, universe, checkpoint_dir)
+
+
+    return model
 
 
 def save_lora_adapter(
