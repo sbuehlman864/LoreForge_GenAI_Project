@@ -1282,10 +1282,10 @@ def run_training_pipeline(
     # Set Hyperband search space
     hyperparam_space = {
         "lr" : tune.loguniform(1e-4, 1e-2),
-        "batch_size" : [32, 64, 128],
-        "d_model" : [256, 512],
-        "n_layers" : [4,6,8],
-        "n_heads" : [4,8],
+        "batch_size" : tune.choice([32, 64, 128]),
+        "d_model" : tune.choice([256, 512]),
+        "n_layers" : tune.choice([4,6,8]),
+        "n_heads" : tune.choice([4,8]),
         "dropout" : tune.uniform(0.05, 0.3),
         # fixed
         "vocab_size": 16_000,
