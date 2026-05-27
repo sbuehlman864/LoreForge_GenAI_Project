@@ -1145,7 +1145,10 @@ def retrieve_context(
     Returns:
         List of k passage strings, ordered by relevance (most relevant first).
     """
-    pass
+    embed_query = embed_passages([query], embed_model_name=embed_model_name)
+    distances, indices = faiss_index.search(embed_query, k)
+
+    return [passages[i] for i in indices[0]]
 
 
 # =============================================================================
