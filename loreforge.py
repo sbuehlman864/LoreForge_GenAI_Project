@@ -1223,3 +1223,75 @@ def generate_story(
             "full_prompt":         The assembled prompt sent to the model.
     """
     pass
+
+
+def run_training_pipeline(
+    universes: list[str],
+    n_hyperband_samples: int = 20,
+    pretrain_max_epochs: int = 10,
+    finetune_epochs: int = 3,
+    finetune_lr: float = 1e-4,
+) -> LoreForgeTransformer:
+    # Set device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Download all datasets needed
+    gutenberg = download_gutenberg_corpus()
+
+    universe_data = {}
+    download_fns = {
+        "star_wars": download_star_wars_corpus,
+        "harry_potter": download_harry_potter_books,
+        "lotr": download_lotr_wikipedia,
+    }
+    for u in universes:
+        universe_data[u] = download_fns[u]()
+    
+    all_texts = [row["text"] for row in gutenberg]
+
+    for u, data in universe_data.items():
+        if u == "star_wars":
+            all_texts += [row["sent"] for row in data]
+        elif u == "harry_potter":
+            all_texts += [f.read_text(encoding="utf-8") for f in data.glob("*.txt")]
+        else:
+            all_texts += [row["text"] for row in data]
+
+    # Create tokenizer set using all loaded data
+    tokenizer = train_bpe_tokenizer(all_texts)
+
+    # Write flat binary token file for pretraining
+    binary_path = prepare_pretraining_data(gutenberg, tokenizer)
+
+    # Write universe text to disk as .txt files
+    out_dir = RAW_DIR / "star_wars"
+    out_dir.mkdir(exist_ok=True)
+    with open(out_dir / "corpus.txt", "w") as f:
+        f.write("\n".join(row["sent"] for row in universe_data["star_wars"]))
+
+    # Prepare text data for each universe
+    finetune_paths = {}
+    for u in universes:
+        finetune_paths[u] = prepare_finetuning_data(
+            universe=u,
+            raw_path=...,
+            tokenizer=tokenizer,
+            out_path=PROCESSED_DIR / f"{u}_finetune.bin",
+        )
+
+    # Set Hyperband search space
+    hyperparam_space = {
+        "lr" : tune.loguniform(1e-4, 1e-2),
+        "batch_size" : [32, 64, 128],
+        "d_model" : [256, 512],
+        "n_layers" : [4,6,8],
+        "n_heads" : [4,8],
+        "dropout" : tune.uniform(0.05, 0.3),
+        # fixed
+        "vocab_size": 16_000,
+        "context_len": 2048,
+        "bin_path": binary_path,
+        "max_epochs": pretrain_max_epochs,
+    }
+
+    pass
