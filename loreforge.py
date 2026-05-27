@@ -1312,7 +1312,7 @@ def run_training_pipeline(
     # Pretrain model
     model = LoreForgeTransformer(best_config["vocab_size"], best_config["d_model"], best_config["n_layers"], best_config["n_heads"], best_config["context_len"], best_config["dropout"])
 
-    model = pretrain(model, binary_path, best_config["context_len"], best_config["batch_size"], pretrain_max_epochs, finetune_lr, 1000, device, CHECKPOINTS_DIR)
+    model = pretrain(model, binary_path, best_config["context_len"], best_config["batch_size"], pretrain_max_epochs, best_config["lr"], 1000, device, CHECKPOINTS_DIR)
 
     
     # Fine tune on universes
@@ -1337,27 +1337,27 @@ def run_training_pipeline(
         # Apply the finetune adapters to the model
         fresh_model = apply_lora_adapters(fresh_model)
 
-        fresh_model = finetune_lora(fresh_model, u, finetune_paths[u], best_config["context_len"], best_config["batch_size"], finetune_epochs, best_config["lr"], device, CHECKPOINTS_DIR)
+        fresh_model = finetune_lora(fresh_model, u, finetune_paths[u], best_config["context_len"], best_config["batch_size"], finetune_epochs, finetune_lr, device, CHECKPOINTS_DIR)
 
-        for u in universes:
-            if u == "star_wars":
-                rag_passages = chunk_documents_for_rag(
-                [row["sent"] for row in universe_data[u]],
+    for u in universes:
+        if u == "star_wars":
+            rag_passages = chunk_documents_for_rag(
+            [row["sent"] for row in universe_data[u]],
+            tokenizer
+        )
+        elif u == "harry_potter":
+            rag_passages = chunk_documents_for_rag(
+            [f.read_text(encoding="utf-8") for f in universe_data[u].glob("*.txt")],
+            tokenizer
+        )
+        else:
+            rag_passages = chunk_documents_for_rag(
+                [row["text"] for row in universe_data[u]],
                 tokenizer
             )
-            elif u == "harry_potter":
-                rag_passages = chunk_documents_for_rag(
-                [f.read_text(encoding="utf-8") for f in universe_data[u].glob("*.txt")],
-                tokenizer
-            )
-            else:
-                rag_passages = chunk_documents_for_rag(
-                    [row["text"] for row in universe_data[u]],
-                    tokenizer
-                )
-            embeddings = embed_passages(rag_passages)
-            build_faiss_index(u, rag_passages, embeddings)
+        embeddings = embed_passages(rag_passages)
+        build_faiss_index(u, rag_passages, embeddings)
 
 
 
-    pass
+    return fresh_model
