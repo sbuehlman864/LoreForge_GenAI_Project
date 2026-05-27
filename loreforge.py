@@ -21,7 +21,7 @@ import requests
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, dataloader
 from torch.optim import AdamW
 
 import ray.train
@@ -1264,17 +1264,25 @@ def run_training_pipeline(
     binary_path = prepare_pretraining_data(gutenberg, tokenizer)
 
     # Write universe text to disk as .txt files
-    out_dir = RAW_DIR / "star_wars"
-    out_dir.mkdir(exist_ok=True)
-    with open(out_dir / "corpus.txt", "w") as f:
-        f.write("\n".join(row["sent"] for row in universe_data["star_wars"]))
+    for u in universes:
+        out_dir = RAW_DIR / u
+        out_dir.mkdir(exist_ok=True)
+        if u == "star_wars":
+            text = "\n".join(row["sent"] for row in universe_data[u])
+        elif u == "harry_potter":
+            text = "\n".join(f.read_text(encoding="utf-8") for f in universe_data[u].glob("*.txt"))
+        else:
+            text = "\n".join(row["text"] for row in universe_data[u])
+        with open(out_dir / "corpus.txt", "w") as f:
+            f.write(text)
+
 
     # Prepare text data for each universe
     finetune_paths = {}
     for u in universes:
         finetune_paths[u] = prepare_finetuning_data(
             universe=u,
-            raw_path=...,
+            raw_path= RAW_DIR / u,
             tokenizer=tokenizer,
             out_path=PROCESSED_DIR / f"{u}_finetune.bin",
         )
@@ -1293,5 +1301,63 @@ def run_training_pipeline(
         "bin_path": binary_path,
         "max_epochs": pretrain_max_epochs,
     }
+
+    # Find the best hyperparam config with hyperband
+    best_config = hyperband_search(ray_train_wrapper, hyperparam_space, n_hyperband_samples)
+
+    # Save best hyperparameters
+    with open(ROOT_DIR / "best_config.json", "w") as f:
+        json.dump(best_config, f, indent=2)
+    
+    # Pretrain model
+    model = LoreForgeTransformer(best_config["vocab_size"], best_config["d_model"], best_config["n_layers"], best_config["n_heads"], best_config["context_len"], best_config["dropout"])
+
+    model = pretrain(model, binary_path, best_config["context_len"], best_config["batch_size"], pretrain_max_epochs, finetune_lr, 1000, device, CHECKPOINTS_DIR)
+
+    
+    # Fine tune on universes
+    for u in universes:
+        # Instantiate a fresh model
+        fresh_model = LoreForgeTransformer(
+        vocab_size=best_config["vocab_size"],
+        d_model=best_config["d_model"],
+        n_layers=best_config["n_layers"],
+        n_heads=best_config["n_heads"],
+        context_len=best_config["context_len"],
+        dropout=best_config["dropout"],
+        )
+        # Grab the pretrained model's state_dict
+        state_dict = torch.load(
+            CHECKPOINTS_DIR / f"pretrain_epoch{pretrain_max_epochs}.pt",
+            weights_only=True
+        )
+        # Load the pretrain weights to the model
+        fresh_model.load_state_dict(state_dict)
+
+        # Apply the finetune adapters to the model
+        fresh_model = apply_lora_adapters(fresh_model)
+
+        fresh_model = finetune_lora(fresh_model, u, finetune_paths[u], best_config["context_len"], best_config["batch_size"], finetune_epochs, best_config["lr"], device, CHECKPOINTS_DIR)
+
+        for u in universes:
+            if u == "star_wars":
+                rag_passages = chunk_documents_for_rag(
+                [row["sent"] for row in universe_data[u]],
+                tokenizer
+            )
+            elif u == "harry_potter":
+                rag_passages = chunk_documents_for_rag(
+                [f.read_text(encoding="utf-8") for f in universe_data[u].glob("*.txt")],
+                tokenizer
+            )
+            else:
+                rag_passages = chunk_documents_for_rag(
+                    [row["text"] for row in universe_data[u]],
+                    tokenizer
+                )
+            embeddings = embed_passages(rag_passages)
+            build_faiss_index(u, rag_passages, embeddings)
+
+
 
     pass
