@@ -76,7 +76,7 @@ RAG_EMBED_MODEL   = "all-MiniLM-L6-v2"
 # 1. DATA DOWNLOAD
 # =============================================================================
 
-def download_gutenberg_corpus(split: str = "train") -> object:
+def download_gutenberg_corpus(split: str = "en") -> object:
     """Download the Project Gutenberg pretraining corpus from HuggingFace.
 
     Uses the `manu/project_gutenberg` dataset (~70 k public-domain English
@@ -84,7 +84,7 @@ def download_gutenberg_corpus(split: str = "train") -> object:
     to the preprocessing functions below.
 
     Args:
-        split: Dataset split to load. Nearly all usable text is in "train".
+        split: Dataset split to load. Splits are by language; use "en" for English.
 
     Returns:
         A HuggingFace Dataset object with at minimum a "text" column.
@@ -125,45 +125,41 @@ def download_harry_potter_books(dest_dir: pathlib.Path = RAW_DIR) -> pathlib.Pat
 
 
 def download_star_wars_corpus(split: str = "train") -> object:
-    """Download and filter Star Wars lore sentences from the Scifi_TV_Shows dataset.
+    """Download and filter Star Wars-related articles from the Wikipedia HuggingFace dataset.
 
-    Source: https://huggingface.co/datasets/lara-martin/Scifi_TV_Shows
-    License: CC-BY-4.0
-    Content: ~270 Star Wars stories (books + Rebels) scraped from the Star Wars
-    Fandom wiki, stored as prose sentences alongside structured event tuples.
+    Source: https://huggingface.co/datasets/wikimedia/wikipedia (English, 20231101)
+    License: CC BY-SA 3.0
 
-    The dataset has no explicit universe column, so Star Wars stories are
-    identified by filtering story_nums where at least one sentence contains
-    an unambiguous Star Wars keyword. All sentences from matching stories
-    are then collected, giving clean narrative prose for fine-tuning and RAG.
+    Role in the pipeline:
+        Fine-tuning and RAG — provides encyclopedic lore entries for Star Wars
+        characters, planets, factions, and events. Filtered by title and lead
+        paragraph to keep only articles that are clearly about Star Wars canon.
 
     Args:
-        split: Dataset split to load ("train", "validation", or "test").
+        split: Dataset split to load (only "train" exists for Wikipedia).
 
     Returns:
-        A HuggingFace Dataset object filtered to Star Wars stories only,
-        with all original columns preserved. Use the "sent" column for
-        raw prose text.
+        A HuggingFace Dataset object filtered to Star Wars-related articles,
+        with columns: id, url, title, text. Use the "text" column for
+        chunking and embedding in build_faiss_index().
     """
-    # Unambiguous Star Wars terms unlikely to appear in other sci-fi shows
     SW_KEYWORDS = {
-        "jedi", "sith", "lightsaber", "skywalker", "darth", "stormtrooper",
-        "x-wing", "tie fighter", "death star", "the force", "force user",
-        "millennium falcon", "rebel alliance", "galactic empire", "clone trooper",
-        "mandalorian", "wookiee", "coruscant", "tatooine", "dagobah",
+        "star wars", "jedi", "sith", "lightsaber", "skywalker", "darth",
+        "stormtrooper", "death star", "the force", "millennium falcon",
+        "rebel alliance", "galactic empire", "clone trooper", "mandalorian",
+        "wookiee", "coruscant", "tatooine", "dagobah", "galactic republic",
     }
 
-    dataset = load_dataset("lara-martin/Scifi_TV_Shows", split=split)
+    dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split=split)
 
-    # Identify story numbers that contain at least one Star Wars sentence
-    sw_story_nums = set()
-    for row in dataset:
-        sent_lower = row["sent"].lower()
-        if any(kw in sent_lower for kw in SW_KEYWORDS):
-            sw_story_nums.add(row["story_num"])
+    def is_sw_article(row):
+        title_lower = row["title"].lower()
+        if any(kw in title_lower for kw in SW_KEYWORDS):
+            return True
+        text_lower = row["text"][:500].lower()
+        return sum(kw in text_lower for kw in SW_KEYWORDS) >= 2
 
-    # Keep all sentences belonging to identified Star Wars stories
-    sw_dataset = dataset.filter(lambda row: row["story_num"] in sw_story_nums)
+    sw_dataset = dataset.filter(is_sw_article)
     return sw_dataset
 
 
@@ -1179,6 +1175,7 @@ def build_generation_prompt(
     Returns:
         Formatted prompt string ready for tokenization and generation.
     """
+    
     pass
 
 
@@ -1250,9 +1247,7 @@ def run_training_pipeline(
     all_texts = [row["text"] for row in gutenberg]
 
     for u, data in universe_data.items():
-        if u == "star_wars":
-            all_texts += [row["sent"] for row in data]
-        elif u == "harry_potter":
+        if u == "harry_potter":
             all_texts += [f.read_text(encoding="utf-8") for f in data.glob("*.txt")]
         else:
             all_texts += [row["text"] for row in data]
@@ -1267,9 +1262,7 @@ def run_training_pipeline(
     for u in universes:
         out_dir = RAW_DIR / u
         out_dir.mkdir(exist_ok=True)
-        if u == "star_wars":
-            text = "\n".join(row["sent"] for row in universe_data[u])
-        elif u == "harry_potter":
+        if u == "harry_potter":
             text = "\n".join(f.read_text(encoding="utf-8") for f in universe_data[u].glob("*.txt"))
         else:
             text = "\n".join(row["text"] for row in universe_data[u])
@@ -1340,16 +1333,11 @@ def run_training_pipeline(
         fresh_model = finetune_lora(fresh_model, u, finetune_paths[u], best_config["context_len"], best_config["batch_size"], finetune_epochs, finetune_lr, device, CHECKPOINTS_DIR)
 
     for u in universes:
-        if u == "star_wars":
+        if u == "harry_potter":
             rag_passages = chunk_documents_for_rag(
-            [row["sent"] for row in universe_data[u]],
-            tokenizer
-        )
-        elif u == "harry_potter":
-            rag_passages = chunk_documents_for_rag(
-            [f.read_text(encoding="utf-8") for f in universe_data[u].glob("*.txt")],
-            tokenizer
-        )
+                [f.read_text(encoding="utf-8") for f in universe_data[u].glob("*.txt")],
+                tokenizer
+            )
         else:
             rag_passages = chunk_documents_for_rag(
                 [row["text"] for row in universe_data[u]],
