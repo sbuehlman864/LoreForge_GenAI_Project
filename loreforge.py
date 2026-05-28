@@ -1341,12 +1341,17 @@ def run_training_pipeline(
         "n_layers" : tune.choice([4,6,8]),
         "n_heads" : tune.choice([4,8]),
         "dropout" : tune.uniform(0.05, 0.3),
-        # fixed
+        # fixed — use shorter context for hyperband trials to save memory
         "vocab_size": 16_000,
-        "context_len": 2048,
+        "context_len": 512,
         "bin_path": binary_path,
         "max_epochs": pretrain_max_epochs,
     }
+
+    # Free large objects from memory before Ray workers spin up
+    import gc
+    del gutenberg, universe_data, all_texts
+    gc.collect()
 
     # Find the best hyperparam config with hyperband
     print("[7/8] Running Hyperband search...")
