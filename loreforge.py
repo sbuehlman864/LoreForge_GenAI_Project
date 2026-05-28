@@ -1231,34 +1231,82 @@ def run_training_pipeline(
 ) -> LoreForgeTransformer:
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[1/8] Device: {device}")
 
-    # Download all datasets needed
+    # Download Gutenberg corpus
+    print("[2/8] Downloading Gutenberg corpus...")
     gutenberg = download_gutenberg_corpus()
+    print(f"      Gutenberg loaded: {len(gutenberg)} documents")
 
+    # Download Wikipedia once if either star_wars or lotr needs it, filter for both
     universe_data = {}
-    download_fns = {
-        "star_wars": download_star_wars_corpus,
-        "harry_potter": download_harry_potter_books,
-        "lotr": download_lotr_wikipedia,
-    }
-    for u in universes:
-        universe_data[u] = download_fns[u]()
-    
-    all_texts = [row["text"] for row in gutenberg]
+    needs_wikipedia = any(u in universes for u in ("star_wars", "lotr"))
+    if needs_wikipedia:
+        print("[3/8] Downloading Wikipedia (single pass for Star Wars + LOTR)...")
+        wiki_dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train")
 
+        SW_KEYWORDS = {
+            "star wars", "jedi", "sith", "lightsaber", "skywalker", "darth",
+            "stormtrooper", "death star", "the force", "millennium falcon",
+            "rebel alliance", "galactic empire", "clone trooper", "mandalorian",
+            "wookiee", "coruscant", "tatooine", "dagobah", "galactic republic",
+        }
+        LOTR_KEYWORDS = {
+            "tolkien", "middle-earth", "lord of the rings", "the hobbit",
+            "silmarillion", "frodo", "gandalf", "aragorn", "sauron", "mordor",
+            "the shire", "rivendell", "rohan", "gondor", "mirkwood", "isengard",
+            "arda", "beleriand", "númenor", "numenor",
+        }
+
+        if "star_wars" in universes:
+            universe_data["star_wars"] = wiki_dataset.filter(
+                lambda row: any(kw in row["title"].lower() for kw in SW_KEYWORDS)
+                or sum(kw in row["text"][:500].lower() for kw in SW_KEYWORDS) >= 2
+            )
+            print(f"      Star Wars articles: {len(universe_data['star_wars'])}")
+        if "lotr" in universes:
+            universe_data["lotr"] = wiki_dataset.filter(
+                lambda row: any(kw in row["title"].lower() for kw in LOTR_KEYWORDS)
+                or sum(kw in row["text"][:500].lower() for kw in LOTR_KEYWORDS) >= 2
+            )
+            print(f"      LOTR articles: {len(universe_data['lotr'])}")
+    else:
+        print("[3/8] Skipping Wikipedia download (not needed for selected universes)")
+
+    if "harry_potter" in universes:
+        print("      Downloading Harry Potter books...")
+        universe_data["harry_potter"] = download_harry_potter_books()
+        print("      Harry Potter books downloaded")
+
+    # Build tokenizer — load from disk if already trained
+    print("[4/8] Preparing tokenizer...")
+    all_texts = [row["text"] for row in gutenberg]
     for u, data in universe_data.items():
         if u == "harry_potter":
             all_texts += [f.read_text(encoding="utf-8") for f in data.glob("*.txt")]
         else:
             all_texts += [row["text"] for row in data]
 
-    # Create tokenizer set using all loaded data
-    tokenizer = train_bpe_tokenizer(all_texts)
+    if TOKENIZER_PATH.exists():
+        print("      Loading existing tokenizer from disk...")
+        tokenizer = load_tokenizer()
+    else:
+        print("      Training new tokenizer...")
+        tokenizer = train_bpe_tokenizer(all_texts)
+    print("      Tokenizer ready")
 
-    # Write flat binary token file for pretraining
-    binary_path = prepare_pretraining_data(gutenberg, tokenizer)
+    # Write pretraining binary — skip if already exists
+    print("[5/8] Preparing pretraining binary...")
+    binary_path = PROCESSED_DIR / "pretrain.bin"
+    if not binary_path.exists():
+        binary_path = prepare_pretraining_data(gutenberg, tokenizer)
+        print(f"      Pretraining binary written to {binary_path}")
+    else:
+        print("      Pretraining binary already exists, skipping...")
 
-    # Write universe text to disk as .txt files
+    # Write universe text to disk as .txt files and prepare fine-tuning binaries
+    print("[6/8] Preparing fine-tuning binaries...")
+    finetune_paths = {}
     for u in universes:
         out_dir = RAW_DIR / u
         out_dir.mkdir(exist_ok=True)
@@ -1269,16 +1317,18 @@ def run_training_pipeline(
         with open(out_dir / "corpus.txt", "w") as f:
             f.write(text)
 
-
-    # Prepare text data for each universe
-    finetune_paths = {}
-    for u in universes:
-        finetune_paths[u] = prepare_finetuning_data(
-            universe=u,
-            raw_path= RAW_DIR / u,
-            tokenizer=tokenizer,
-            out_path=PROCESSED_DIR / f"{u}_finetune.bin",
-        )
+        finetune_bin = PROCESSED_DIR / f"{u}_finetune.bin"
+        if not finetune_bin.exists():
+            print(f"Preparing fine-tuning binary for {u}...")
+            finetune_paths[u] = prepare_finetuning_data(
+                universe=u,
+                raw_path=RAW_DIR / u,
+                tokenizer=tokenizer,
+                out_path=finetune_bin,
+            )
+        else:
+            print(f"Fine-tuning binary for {u} already exists, skipping...")
+            finetune_paths[u] = finetune_bin
 
     # Set Hyperband search space
     hyperparam_space = {
@@ -1296,43 +1346,44 @@ def run_training_pipeline(
     }
 
     # Find the best hyperparam config with hyperband
+    print("[7/8] Running Hyperband search...")
     best_config = hyperband_search(ray_train_wrapper, hyperparam_space, n_hyperband_samples)
+    print(f"      Best config: {best_config}")
 
     # Save best hyperparameters
     with open(ROOT_DIR / "best_config.json", "w") as f:
         json.dump(best_config, f, indent=2)
-    
+    print("      Best config saved to best_config.json")
+
     # Pretrain model
+    print(f"[8/8] Pretraining model ({pretrain_max_epochs} epochs)...")
     model = LoreForgeTransformer(best_config["vocab_size"], best_config["d_model"], best_config["n_layers"], best_config["n_heads"], best_config["context_len"], best_config["dropout"])
-
+    print(f"      Model parameters: {model.count_parameters():,}")
     model = pretrain(model, binary_path, best_config["context_len"], best_config["batch_size"], pretrain_max_epochs, best_config["lr"], 1000, device, CHECKPOINTS_DIR)
+    print("      Pretraining complete")
 
-    
     # Fine tune on universes
-    for u in universes:
-        # Instantiate a fresh model
+    for i, u in enumerate(universes):
+        print(f"[LoRA {i+1}/{len(universes)}] Fine-tuning {u} adapter...")
         fresh_model = LoreForgeTransformer(
-        vocab_size=best_config["vocab_size"],
-        d_model=best_config["d_model"],
-        n_layers=best_config["n_layers"],
-        n_heads=best_config["n_heads"],
-        context_len=best_config["context_len"],
-        dropout=best_config["dropout"],
+            vocab_size=best_config["vocab_size"],
+            d_model=best_config["d_model"],
+            n_layers=best_config["n_layers"],
+            n_heads=best_config["n_heads"],
+            context_len=best_config["context_len"],
+            dropout=best_config["dropout"],
         )
-        # Grab the pretrained model's state_dict
         state_dict = torch.load(
             CHECKPOINTS_DIR / f"pretrain_epoch{pretrain_max_epochs}.pt",
             weights_only=True
         )
-        # Load the pretrain weights to the model
         fresh_model.load_state_dict(state_dict)
-
-        # Apply the finetune adapters to the model
         fresh_model = apply_lora_adapters(fresh_model)
-
         fresh_model = finetune_lora(fresh_model, u, finetune_paths[u], best_config["context_len"], best_config["batch_size"], finetune_epochs, finetune_lr, device, CHECKPOINTS_DIR)
+        print(f"      {u} adapter saved")
 
-    for u in universes:
+    for i, u in enumerate(universes):
+        print(f"[RAG {i+1}/{len(universes)}] Building FAISS index for {u}...")
         if u == "harry_potter":
             rag_passages = chunk_documents_for_rag(
                 [f.read_text(encoding="utf-8") for f in universe_data[u].glob("*.txt")],
@@ -1343,9 +1394,10 @@ def run_training_pipeline(
                 [row["text"] for row in universe_data[u]],
                 tokenizer
             )
+        print(f"      {len(rag_passages)} passages chunked, embedding...")
         embeddings = embed_passages(rag_passages)
         build_faiss_index(u, rag_passages, embeddings)
+        print(f"      {u} FAISS index saved")
 
-
-
+    print("Training pipeline complete.")
     return fresh_model
