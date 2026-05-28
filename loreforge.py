@@ -328,19 +328,21 @@ def prepare_pretraining_data(
     Returns:
         Path to the written binary token file.
     """
-    # ID EOS token
     eos_id = tokenizer.token_to_id("[EOS]")
 
-    # Loop over dataset, encode text, grab ids
-    all_tokens = []
-    for row in dataset:
-        ids = tokenizer.encode(row["text"]).ids
-        all_tokens.extend(ids)
-        all_tokens.append(eos_id)
-
-    # Convert text to numpy array and write to a file
-    arr = np.array(all_tokens, dtype=np.uint16)
-    arr.tofile(out_path)
+    # Write incrementally in chunks to avoid loading entire corpus into RAM
+    CHUNK_SIZE = 100_000
+    buffer = []
+    with open(out_path, "wb") as f:
+        for row in dataset:
+            ids = tokenizer.encode(row["text"]).ids
+            buffer.extend(ids)
+            buffer.append(eos_id)
+            if len(buffer) >= CHUNK_SIZE:
+                np.array(buffer, dtype=np.uint16).tofile(f)
+                buffer = []
+        if buffer:
+            np.array(buffer, dtype=np.uint16).tofile(f)
 
     return out_path
 
@@ -779,7 +781,7 @@ def pretrain(
         Trained model (weights updated in place; also returned for convenience).
     """
     dataset = PretrainDataset(bin_path, context_len)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
     optimizer = AdamW(model.parameters(), lr=lr)
     total_steps = n_epochs * len(dataloader)
     scheduler = build_lr_schedule(optimizer, warmup_steps, total_steps)
@@ -804,7 +806,7 @@ def ray_train_wrapper(config):
     ).to(device)
 
     dataset = PretrainDataset(config["bin_path"], config["context_len"])
-    dataloader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, num_workers=0)
     total_steps = config["max_epochs"] * len(dataloader)
     optimizer = AdamW(model.parameters(), lr=config["lr"])
     scheduler = build_lr_schedule(optimizer, warmup_steps=100, total_steps=total_steps)
@@ -869,7 +871,8 @@ def hyperband_search(
         param_space=config_space,
         tune_config=tune.TuneConfig(
             num_samples=n_samples,
-            scheduler=scheduler
+            scheduler=scheduler,
+            max_concurrent_trials=1,
         ),
     )
 
@@ -972,7 +975,7 @@ def finetune_lora(
         Model with fine-tuned LoRA adapters.
     """
     dataset = PretrainDataset(bin_path, context_len)
-    dataloader = DataLoader(dataset, batch_size, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
 
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
     scheduler = build_lr_schedule(optimizer, warmup_steps=100, total_steps=n_epochs * len(dataloader))
