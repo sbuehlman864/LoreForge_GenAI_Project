@@ -1353,15 +1353,20 @@ def run_training_pipeline(
     del gutenberg, universe_data, all_texts
     gc.collect()
 
-    # Find the best hyperparam config with hyperband
-    print("[7/8] Running Hyperband search...")
-    best_config = hyperband_search(ray_train_wrapper, hyperparam_space, n_hyperband_samples)
-    print(f"      Best config: {best_config}")
-
-    # Save best hyperparameters
-    with open(ROOT_DIR / "best_config.json", "w") as f:
-        json.dump(best_config, f, indent=2)
-    print("      Best config saved to best_config.json")
+    # Find the best hyperparam config with hyperband — skip if already saved
+    best_config_path = ROOT_DIR / "best_config.json"
+    if best_config_path.exists():
+        print("[7/8] Loading existing best config from disk...")
+        with open(best_config_path) as f:
+            best_config = json.load(f)
+        print(f"      Best config: {best_config}")
+    else:
+        print("[7/8] Running Hyperband search...")
+        best_config = hyperband_search(ray_train_wrapper, hyperparam_space, n_hyperband_samples)
+        print(f"      Best config: {best_config}")
+        with open(best_config_path, "w") as f:
+            json.dump(best_config, f, indent=2)
+        print("      Best config saved to best_config.json")
 
     # Pretrain model
     print(f"[8/8] Pretraining model ({pretrain_max_epochs} epochs)...")
