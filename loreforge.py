@@ -867,7 +867,7 @@ def hyperband_search(
     )
 
     tuner = tune.Tuner(
-        train_fn,
+        tune.with_resources(train_fn, resources={"gpu": 1}),
         param_space=config_space,
         tune_config=tune.TuneConfig(
             num_samples=n_samples,
