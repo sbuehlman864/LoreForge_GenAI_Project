@@ -333,7 +333,7 @@ def prepare_pretraining_data(
     eos_id = tokenizer.token_to_id("[EOS]")
 
     if max_docs is not None:
-        dataset = dataset.select(range(min(max_docs, len(dataset))))
+        dataset = dataset.shuffle(seed=42).select(range(min(max_docs, len(dataset))))
         print(f"      Using {len(dataset)} documents for pretraining")
 
     # Write incrementally in chunks to avoid loading entire corpus into RAM
