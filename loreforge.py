@@ -313,6 +313,7 @@ def prepare_pretraining_data(
     dataset,
     tokenizer: "Tokenizer",
     out_path: pathlib.Path = PROCESSED_DIR / "pretrain.bin",
+    max_docs: int = None,
 ) -> pathlib.Path:
     """Tokenize the Gutenberg corpus and write a flat binary token file for pretraining.
 
@@ -324,11 +325,16 @@ def prepare_pretraining_data(
         dataset:   HuggingFace Dataset returned by download_gutenberg_corpus().
         tokenizer: Trained BPE Tokenizer (see train_bpe_tokenizer()).
         out_path:  Destination .bin file.
+        max_docs:  Maximum number of documents to process. If None, uses full dataset.
 
     Returns:
         Path to the written binary token file.
     """
     eos_id = tokenizer.token_to_id("[EOS]")
+
+    if max_docs is not None:
+        dataset = dataset.select(range(min(max_docs, len(dataset))))
+        print(f"      Using {len(dataset)} documents for pretraining")
 
     # Write incrementally in chunks to avoid loading entire corpus into RAM
     CHUNK_SIZE = 100_000
@@ -1236,6 +1242,7 @@ def run_training_pipeline(
     pretrain_max_epochs: int = 10,
     finetune_epochs: int = 3,
     finetune_lr: float = 1e-4,
+    pretrain_max_docs: int = None,
 ) -> LoreForgeTransformer:
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1307,7 +1314,7 @@ def run_training_pipeline(
     print("[5/8] Preparing pretraining binary...")
     binary_path = PROCESSED_DIR / "pretrain.bin"
     if not binary_path.exists():
-        binary_path = prepare_pretraining_data(gutenberg, tokenizer)
+        binary_path = prepare_pretraining_data(gutenberg, tokenizer, max_docs=pretrain_max_docs)
         print(f"      Pretraining binary written to {binary_path}")
     else:
         print("      Pretraining binary already exists, skipping...")
