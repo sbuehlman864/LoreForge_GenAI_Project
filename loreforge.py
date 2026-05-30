@@ -792,7 +792,7 @@ def pretrain(
         Trained model (weights updated in place; also returned for convenience).
     """
     dataset = PretrainDataset(bin_path, context_len)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
     optimizer = AdamW(model.parameters(), lr=lr)
     total_steps = n_epochs * len(dataloader)
     scheduler = build_lr_schedule(optimizer, warmup_steps, total_steps)
@@ -986,7 +986,7 @@ def finetune_lora(
         Model with fine-tuned LoRA adapters.
     """
     dataset = PretrainDataset(bin_path, context_len)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
     scheduler = build_lr_schedule(optimizer, warmup_steps=100, total_steps=n_epochs * len(dataloader))
