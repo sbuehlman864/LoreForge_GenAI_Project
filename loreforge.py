@@ -735,18 +735,23 @@ def train_one_epoch(
     """
     model.train()
     total_loss = 0.0
+    log_interval = 100
 
-    for x,y in dataloader:
-        x,y = x.to(device), y.to(device)
-    
+    for step, (x, y) in enumerate(dataloader):
+        x, y = x.to(device), y.to(device)
+
         optimizer.zero_grad()
-        _, loss = model(x,y)
+        _, loss = model(x, y)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
         optimizer.step()
         scheduler.step()
         total_loss += loss.item()
+
+        if (step + 1) % log_interval == 0:
+            avg_loss = total_loss / (step + 1)
+            print(f"  Step {step + 1}/{len(dataloader)} — loss: {avg_loss:.4f}")
 
     return total_loss / len(dataloader)
 
