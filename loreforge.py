@@ -536,15 +536,12 @@ class CausalSelfAttention(nn.Module):
         
         q, k, v = reshape(q), reshape(k), reshape(v)
 
-        # Scaled dot-product attention
-        scale = self.head_dim ** -0.5 # sqrt d_k
-        attention = (q @ k.transpose(-2,-1)) * scale
-        attention = attention + self.mask[:T,:T] # Apply causal mask
-        attention = torch.softmax(attention, dim=-1)
-        attention = self.dropout(attention)
-
-        # Combine heads and project out
-        output = (attention @ v).transpose(1,2).contiguous().view(B,T,C)
+        # Flash Attention via PyTorch SDPA — handles masking, scaling, and dropout internally
+        output = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            is_causal=True,
+        ).transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(output)
 
 
