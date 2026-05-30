@@ -794,7 +794,6 @@ def pretrain(
     total_steps = n_epochs * len(dataloader)
     scheduler = build_lr_schedule(optimizer, warmup_steps, total_steps)
     model = model.to(device)
-    model = torch.compile(model)
 
     for epoch in range(1, n_epochs  + 1):
         loss = train_one_epoch(model, dataloader, optimizer, scheduler, device)
