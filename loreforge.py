@@ -1377,15 +1377,37 @@ def run_training_pipeline(
             json.dump(best_config, f, indent=2)
         print("      Best config saved to best_config.json")
 
-    # Pretrain model
+    # Pretrain model — skip if final epoch checkpoint already exists
     print(f"[8/8] Pretraining model ({pretrain_max_epochs} epochs)...")
-    model = LoreForgeTransformer(best_config["vocab_size"], best_config["d_model"], best_config["n_layers"], best_config["n_heads"], best_config["context_len"], best_config["dropout"])
-    print(f"      Model parameters: {model.count_parameters():,}")
-    model = pretrain(model, binary_path, best_config["context_len"], best_config["batch_size"], pretrain_max_epochs, best_config["lr"], 1000, device, CHECKPOINTS_DIR)
+    pretrain_checkpoint = CHECKPOINTS_DIR / f"pretrain_epoch{pretrain_max_epochs}.pt"
+    if pretrain_checkpoint.exists():
+        print(f"      Checkpoint {pretrain_checkpoint.name} already exists, skipping pretraining...")
+        model = LoreForgeTransformer(best_config["vocab_size"], best_config["d_model"], best_config["n_layers"], best_config["n_heads"], best_config["context_len"], best_config["dropout"])
+        model.load_state_dict(torch.load(pretrain_checkpoint, weights_only=True))
+        model = model.to(device)
+    else:
+        model = LoreForgeTransformer(best_config["vocab_size"], best_config["d_model"], best_config["n_layers"], best_config["n_heads"], best_config["context_len"], best_config["dropout"])
+        print(f"      Model parameters: {model.count_parameters():,}")
+        model = pretrain(model, binary_path, best_config["context_len"], best_config["batch_size"], pretrain_max_epochs, best_config["lr"], 1000, device, CHECKPOINTS_DIR)
     print("      Pretraining complete")
 
-    # Fine tune on universes
+    # Fine tune on universes — skip if adapter already exists
     for i, u in enumerate(universes):
+        adapter_path = CHECKPOINTS_DIR / f"{u}_lora.pt"
+        if adapter_path.exists():
+            print(f"[LoRA {i+1}/{len(universes)}] {u} adapter already exists, skipping...")
+            fresh_model = LoreForgeTransformer(
+                vocab_size=best_config["vocab_size"],
+                d_model=best_config["d_model"],
+                n_layers=best_config["n_layers"],
+                n_heads=best_config["n_heads"],
+                context_len=best_config["context_len"],
+                dropout=best_config["dropout"],
+            )
+            fresh_model = apply_lora_adapters(fresh_model)
+            fresh_model = load_lora_adapter(fresh_model, u, CHECKPOINTS_DIR)
+            fresh_model = fresh_model.to(device)
+            continue
         print(f"[LoRA {i+1}/{len(universes)}] Fine-tuning {u} adapter...")
         fresh_model = LoreForgeTransformer(
             vocab_size=best_config["vocab_size"],
