@@ -717,26 +717,35 @@ def build_lr_schedule(optimizer, warmup_steps: int, total_steps: int):
 
 
 def train_one_epoch(
-    model: LoreForgeTransformer,
+    model,
     dataloader: DataLoader,
     optimizer,
     scheduler,
     device: torch.device,
     grad_clip: float = 1.0,
+    rank: int = 0,
+    sampler=None,
+    epoch: int = 0,
 ) -> float:
     """Run one full pass over the pretraining dataloader and return mean loss.
 
     Args:
-        model:      The transformer model.
+        model:      The transformer model (may be DDP-wrapped).
         dataloader: Pretraining DataLoader.
         optimizer:  AdamW optimizer.
         scheduler:  LR scheduler (stepped per batch).
         device:     torch.device ("cuda" or "cpu").
         grad_clip:  Gradient norm clipping threshold.
+        rank:       Process rank (only rank 0 prints logs).
+        sampler:    DistributedSampler — set_epoch called each epoch for correct shuffling.
+        epoch:      Current epoch number passed to sampler.set_epoch().
 
     Returns:
         Mean cross-entropy loss over the epoch.
     """
+    if sampler is not None:
+        sampler.set_epoch(epoch)
+
     model.train()
     total_loss = 0.0
     log_interval = 100
@@ -753,7 +762,7 @@ def train_one_epoch(
         scheduler.step()
         total_loss += loss.item()
 
-        if (step + 1) % log_interval == 0:
+        if rank == 0 and (step + 1) % log_interval == 0:
             avg_loss = total_loss / (step + 1)
             print(f"  Step {step + 1}/{len(dataloader)} — loss: {avg_loss:.4f}")
 
@@ -770,37 +779,59 @@ def pretrain(
     warmup_steps: int,
     device: torch.device,
     checkpoint_dir: pathlib.Path = CHECKPOINTS_DIR,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> LoreForgeTransformer:
-    """Full pretraining loop with checkpointing.
+    """Full pretraining loop with checkpointing. Supports single-GPU and multi-GPU DDP.
 
-    Saves a checkpoint after each epoch to checkpoint_dir/pretrain_epoch{n}.pt.
+    Saves a checkpoint after each epoch to checkpoint_dir/pretrain_epoch{n}.pt (rank 0 only).
 
     Args:
         model:          Initialized LoreForgeTransformer.
         bin_path:       Path to the pretraining token binary.
         context_len:    Sequence length (must match model).
-        batch_size:     Samples per gradient step.
+        batch_size:     Per-GPU batch size.
         n_epochs:       Number of full passes over the corpus.
         lr:             Peak learning rate for AdamW.
         warmup_steps:   Linear warmup steps.
         device:         Training device.
         checkpoint_dir: Where to write epoch checkpoints.
+        rank:           Process rank (0 = main process).
+        world_size:     Total number of processes (GPUs).
 
     Returns:
-        Trained model (weights updated in place; also returned for convenience).
+        Trained model.
     """
+    import torch.distributed as dist
+    from torch.utils.data.distributed import DistributedSampler
+    from torch.nn.parallel import DistributedDataParallel as DDP
+
     dataset = PretrainDataset(bin_path, context_len)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+
+    if world_size > 1:
+        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=4, pin_memory=True)
+    else:
+        sampler = None
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+
+    model = model.to(device)
+    if world_size > 1:
+        model = DDP(model, device_ids=[rank])
+
     optimizer = AdamW(model.parameters(), lr=lr)
     total_steps = n_epochs * len(dataloader)
     scheduler = build_lr_schedule(optimizer, warmup_steps, total_steps)
-    model = model.to(device)
 
-    for epoch in range(1, n_epochs  + 1):
-        loss = train_one_epoch(model, dataloader, optimizer, scheduler, device)
-        print(f"Epoch {epoch} loss: {loss:.4f}")
-        torch.save(model.state_dict(), checkpoint_dir / f"pretrain_epoch{epoch}.pt")
-    return model
+    for epoch in range(1, n_epochs + 1):
+        loss = train_one_epoch(model, dataloader, optimizer, scheduler, device,
+                               rank=rank, sampler=sampler, epoch=epoch)
+        if rank == 0:
+            print(f"Epoch {epoch} loss: {loss:.4f}")
+            raw_model = model.module if world_size > 1 else model
+            torch.save(raw_model.state_dict(), checkpoint_dir / f"pretrain_epoch{epoch}.pt")
+
+    return model.module if world_size > 1 else model
 
 def ray_train_wrapper(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -962,42 +993,57 @@ def finetune_lora(
     lr: float,
     device: torch.device,
     checkpoint_dir: pathlib.Path = CHECKPOINTS_DIR,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> LoreForgeTransformer:
-    """Fine-tune the LoRA adapters on a single universe corpus.
+    """Fine-tune the LoRA adapters on a single universe corpus. Supports DDP.
 
     The base model weights stay frozen; only LoRA A/B matrices are updated.
-    Saves adapter weights (not full model) after each epoch to
-    checkpoint_dir/<universe>_lora_epoch{n}.pt.
+    Saves adapter weights after each epoch (rank 0 only).
 
     Args:
         model:          LoreForgeTransformer with LoRA adapters already applied.
         universe:       Key from UNIVERSES (used for checkpoint naming).
         bin_path:       Path to the universe fine-tuning token binary.
         context_len:    Sequence length.
-        batch_size:     Samples per step.
+        batch_size:     Per-GPU batch size.
         n_epochs:       Fine-tuning epochs.
-        lr:             AdamW learning rate (typically smaller than pretraining lr).
+        lr:             AdamW learning rate.
         device:         Training device.
         checkpoint_dir: Where to save adapter checkpoints.
+        rank:           Process rank.
+        world_size:     Total number of processes (GPUs).
 
     Returns:
         Model with fine-tuned LoRA adapters.
     """
+    from torch.utils.data.distributed import DistributedSampler
+    from torch.nn.parallel import DistributedDataParallel as DDP
+
     dataset = PretrainDataset(bin_path, context_len)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+
+    if world_size > 1:
+        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=4, pin_memory=True)
+        model = model.to(device)
+        model = DDP(model, device_ids=[rank])
+    else:
+        sampler = None
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+        model = model.to(device)
 
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
     scheduler = build_lr_schedule(optimizer, warmup_steps=100, total_steps=n_epochs * len(dataloader))
 
-    model.to(device)
     for epoch in range(1, n_epochs + 1):
-        loss = train_one_epoch(model, dataloader, optimizer, scheduler, device)
-        print(f"Epoch {epoch} loss: {loss : .4f}")
+        loss = train_one_epoch(model, dataloader, optimizer, scheduler, device,
+                               rank=rank, sampler=sampler, epoch=epoch)
+        if rank == 0:
+            print(f"Epoch {epoch} loss: {loss:.4f}")
+            raw_model = model.module if world_size > 1 else model
+            save_lora_adapter(raw_model, universe, checkpoint_dir)
 
-        save_lora_adapter(model, universe, checkpoint_dir)
-
-
-    return model
+    return model.module if world_size > 1 else model
 
 
 def save_lora_adapter(
