@@ -1295,7 +1295,7 @@ def run_training_pipeline(
     all_texts = [row["text"] for row in gutenberg]
     for u, data in universe_data.items():
         if u == "harry_potter":
-            all_texts += [f.read_text(encoding="utf-8") for f in data.glob("*.txt")]
+            all_texts += [f.read_text(encoding="utf-8") for f in data.rglob("*.txt")]
         else:
             all_texts += [row["text"] for row in data]
 
@@ -1323,7 +1323,7 @@ def run_training_pipeline(
         out_dir = RAW_DIR / u
         out_dir.mkdir(exist_ok=True)
         if u == "harry_potter":
-            text = "\n".join(f.read_text(encoding="utf-8") for f in universe_data[u].glob("*.txt"))
+            text = "\n".join(f.read_text(encoding="utf-8") for f in universe_data[u].rglob("*.txt"))
         else:
             text = "\n".join(row["text"] for row in universe_data[u])
         with open(out_dir / "corpus.txt", "w") as f:
