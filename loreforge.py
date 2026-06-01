@@ -15,6 +15,7 @@ import math
 import time
 import shutil
 import pathlib
+import token
 import requests
 
 
@@ -1186,8 +1187,11 @@ def build_generation_prompt(
     Returns:
         Formatted prompt string ready for tokenization and generation.
     """
+    uni_control_token = UNIVERSES[universe]["control_token"]
+    joined_passages = "\n\n".join(retrieved_passages)
+
     
-    pass
+    return f"{uni_control_token}\n--- Lore Context ---\n{joined_passages}\n--- Story ---\n{user_prompt}"
 
 
 @torch.no_grad()
@@ -1230,7 +1234,36 @@ def generate_story(
             "retrieved_passages":  The lore passages used as context.
             "full_prompt":         The assembled prompt sent to the model.
     """
-    pass
+    if device is None:
+        device = next(model.parameters()).device
+
+
+    top_passages = retrieve_context(prompt, universe, faiss_index, passages, RAG_EMBED_MODEL, top_k)
+    generation_prompt = build_generation_prompt(prompt, top_passages, universe)
+    token_ids = tokenizer.encode(generation_prompt).ids
+    
+    for _ in range(max_new_tokens):
+        input_ids = torch.tensor(token_ids, dtype=torch.long).unsqueeze(0).to(device)
+        if input_ids.shape[1] > model.context_len:
+            input_ids = input_ids[:, -model.context_len:]
+        
+        logits = model(input_ids)[0][0, -1, :]
+        temp_logs = logits / temperature
+        
+        top_k_vals, _ = torch.topk(temp_logs, top_k)
+        temp_logs[temp_logs < top_k_vals[-1]] = float('-inf')
+        probs = torch.softmax(temp_logs, dim=-1)
+        next_token = torch.multinomial(probs, num_samples=1).item()
+        
+        token_ids.append(next_token)
+    
+    prompt_len = len(tokenizer.encode(generation_prompt).ids)
+    decoded_tokens = tokenizer.decode(token_ids[prompt_len:])
+
+
+
+
+    return {"generated_text": decoded_tokens, "retrieved_passages": top_passages, "full_prompt": generation_prompt}
 
 
 def run_training_pipeline(
@@ -1427,17 +1460,16 @@ def run_training_pipeline(
         print(f"      {u} adapter saved")
 
     for i, u in enumerate(universes):
+        index_path = INDICES_DIR / f"{u}.faiss"
+        if index_path.exists():
+            print(f"[RAG {i+1}/{len(universes)}] {u} FAISS index already exists, skipping...")
+            continue
         print(f"[RAG {i+1}/{len(universes)}] Building FAISS index for {u}...")
-        if u == "harry_potter":
-            rag_passages = chunk_documents_for_rag(
-                [f.read_text(encoding="utf-8") for f in universe_data[u].glob("*.txt")],
-                tokenizer
-            )
-        else:
-            rag_passages = chunk_documents_for_rag(
-                [row["text"] for row in universe_data[u]],
-                tokenizer
-            )
+        corpus_path = RAW_DIR / u / "corpus.txt"
+        rag_passages = chunk_documents_for_rag(
+            [corpus_path.read_text(encoding="utf-8")],
+            tokenizer
+        )
         print(f"      {len(rag_passages)} passages chunked, embedding...")
         embeddings = embed_passages(rag_passages)
         build_faiss_index(u, rag_passages, embeddings)
