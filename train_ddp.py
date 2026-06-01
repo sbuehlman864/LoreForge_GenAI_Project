@@ -28,11 +28,7 @@ from datasets import load_dataset
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-UNIVERSES         = ["star_wars", "harry_potter", "lotr"]
-PRETRAIN_MAX_DOCS = 2000
-PRETRAIN_EPOCHS   = 5
-FINETUNE_EPOCHS   = 5
-FINETUNE_LR       = 1e-4
+UNIVERSES = ["star_wars", "harry_potter", "lotr"]
 
 # ── DDP Init ──────────────────────────────────────────────────────────────────
 
@@ -51,6 +47,12 @@ if rank == 0:
 best_config_path = ROOT_DIR / "best_config.json"
 with open(best_config_path) as f:
     best_config = json.load(f)
+
+PRETRAIN_EPOCHS   = best_config["pretrain_epochs"]
+RESUME_FROM_EPOCH = best_config["resume_from_epoch"]
+FINETUNE_EPOCHS   = best_config["finetune_epochs"]
+FINETUNE_LR       = best_config["finetune_lr"]
+PRETRAIN_MAX_DOCS = best_config["pretrain_max_docs"]
 
 if rank == 0:
     print(f"Config: {best_config}")
@@ -144,33 +146,49 @@ tokenizer = load_tokenizer()
 
 # ── Pretraining ───────────────────────────────────────────────────────────────
 
-pretrain_checkpoint = CHECKPOINTS_DIR / f"pretrain_epoch{PRETRAIN_EPOCHS}.pt"
 pretrain_bin = PROCESSED_DIR / "pretrain.bin"
+final_checkpoint = CHECKPOINTS_DIR / f"pretrain_epoch{PRETRAIN_EPOCHS}.pt"
 
-if pretrain_checkpoint.exists():
+model = LoreForgeTransformer(
+    vocab_size=best_config["vocab_size"],
+    d_model=best_config["d_model"],
+    n_layers=best_config["n_layers"],
+    n_heads=best_config["n_heads"],
+    context_len=best_config["context_len"],
+    dropout=best_config["dropout"],
+)
+
+if final_checkpoint.exists():
     if rank == 0:
-        print(f"Pretraining checkpoint exists, skipping...")
-    model = LoreForgeTransformer(
-        vocab_size=best_config["vocab_size"],
-        d_model=best_config["d_model"],
-        n_layers=best_config["n_layers"],
-        n_heads=best_config["n_heads"],
+        print(f"Final pretrain checkpoint exists, skipping pretraining...")
+    model.load_state_dict(torch.load(final_checkpoint, weights_only=True))
+elif RESUME_FROM_EPOCH > 0:
+    resume_checkpoint = CHECKPOINTS_DIR / f"pretrain_epoch{RESUME_FROM_EPOCH}.pt"
+    if rank == 0:
+        print(f"Resuming pretraining from epoch {RESUME_FROM_EPOCH} → {PRETRAIN_EPOCHS}...")
+        print(f"Model parameters: {model.count_parameters():,}")
+    model.load_state_dict(torch.load(resume_checkpoint, weights_only=True))
+    additional_epochs = PRETRAIN_EPOCHS - RESUME_FROM_EPOCH
+    model = pretrain(
+        model, pretrain_bin,
         context_len=best_config["context_len"],
-        dropout=best_config["dropout"],
+        batch_size=best_config["batch_size"],
+        n_epochs=additional_epochs,
+        lr=best_config["lr"],
+        warmup_steps=1000,
+        device=device,
+        checkpoint_dir=CHECKPOINTS_DIR,
+        rank=rank,
+        world_size=world_size,
     )
-    model.load_state_dict(torch.load(pretrain_checkpoint, weights_only=True))
+    # Rename last checkpoint to match final epoch number
+    if rank == 0:
+        last_saved = CHECKPOINTS_DIR / f"pretrain_epoch{additional_epochs}.pt"
+        if last_saved.exists():
+            last_saved.rename(final_checkpoint)
 else:
     if rank == 0:
-        print(f"Starting pretraining ({PRETRAIN_EPOCHS} epochs, {world_size} GPUs)...")
-    model = LoreForgeTransformer(
-        vocab_size=best_config["vocab_size"],
-        d_model=best_config["d_model"],
-        n_layers=best_config["n_layers"],
-        n_heads=best_config["n_heads"],
-        context_len=best_config["context_len"],
-        dropout=best_config["dropout"],
-    )
-    if rank == 0:
+        print(f"Starting pretraining from scratch ({PRETRAIN_EPOCHS} epochs, {world_size} GPUs)...")
         print(f"Model parameters: {model.count_parameters():,}")
     model = pretrain(
         model, pretrain_bin,
