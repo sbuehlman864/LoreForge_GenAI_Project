@@ -5,6 +5,8 @@ data/
 
 # Checkpoints
 checkpoints/
+*.pt
+initial_training_bins/
 
 # Python
 __pycache__/
