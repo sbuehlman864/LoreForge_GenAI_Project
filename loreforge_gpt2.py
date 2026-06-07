@@ -223,7 +223,7 @@ def load_lora_adapter(
     Returns:
         Model with adapter weights loaded.
     """
-    adapter_weights = torch.load(path / f"{universe}_gpt2_lora.pt", weights_only=True)
+    adapter_weights = torch.load(path / f"{universe}_gpt2_lora.pt", weights_only=True, map_location="cpu")
     model.load_state_dict(adapter_weights, strict=False)
     return model
 
@@ -361,8 +361,16 @@ def load_faiss_index(
     universe: str,
     index_dir: pathlib.Path = INDICES_DIR,
 ) -> tuple:
-    idx = faiss.read_index(str(index_dir / f"{universe}_gpt2.faiss"))
-    with open(index_dir / f"{universe}_gpt2_passages.json") as f:
+    gpt2_path = index_dir / f"{universe}_gpt2.faiss"
+    fallback_path = index_dir / f"{universe}.faiss"
+    if gpt2_path.exists():
+        index_path = gpt2_path
+        passages_path = index_dir / f"{universe}_gpt2_passages.json"
+    else:
+        index_path = fallback_path
+        passages_path = index_dir / f"{universe}_passages.json"
+    idx = faiss.read_index(str(index_path))
+    with open(passages_path) as f:
         passages = json.load(f)
     return idx, passages
 
@@ -391,8 +399,20 @@ def build_generation_prompt(
 ) -> str:
     """Assemble the full generation prompt with universe token and lore context."""
     control_token = UNIVERSES[universe]["control_token"]
-    joined_passages = "\n\n".join(retrieved_passages)
-    return f"{control_token}\n--- Lore Context ---\n{joined_passages}\n--- Story ---\n{user_prompt}"
+    if retrieved_passages:
+        joined_passages = "\n\n".join(retrieved_passages)
+        context_block = f"Lore reference:\n{joined_passages}\n\n"
+    else:
+        context_block = ""
+    return (
+        f"{control_token}\n"
+        f"{context_block}"
+        f"Write a creative short story set in the {universe.replace('_', ' ')} universe "
+        f"based on the following prompt. Write as a narrative with characters, dialogue, "
+        f"and vivid description — not as an article or encyclopedia entry.\n\n"
+        f"Prompt: {user_prompt}\n\n"
+        f"Story:\n"
+    )
 
 
 @torch.no_grad()
@@ -407,6 +427,7 @@ def generate_story(
     temperature: float = 0.9,
     top_k: int = 50,
     device: torch.device = None,
+    use_rag: bool = True,
 ) -> dict:
     """Run the full RAG + GPT-2 generation pipeline.
 
@@ -428,10 +449,11 @@ def generate_story(
     if device is None:
         device = next(model.parameters()).device
 
-    retrieved = retrieve_context(prompt, universe, faiss_index, passages)
-    full_prompt = build_generation_prompt(prompt, retrieved, universe)
+    retrieved = retrieve_context(prompt, universe, faiss_index, passages) if use_rag else []
+    full_prompt = build_generation_prompt(prompt, retrieved, universe) if use_rag else prompt
 
-    inputs = tokenizer(full_prompt, return_tensors="pt").to(device)
+    max_prompt_tokens = 1024 - max_new_tokens
+    inputs = tokenizer(full_prompt, return_tensors="pt", truncation=True, max_length=max_prompt_tokens).to(device)
     prompt_len = inputs["input_ids"].shape[1]
 
     output_ids = model.generate(
@@ -441,6 +463,8 @@ def generate_story(
         top_k=top_k,
         do_sample=True,
         pad_token_id=tokenizer.eos_token_id,
+        repetition_penalty=1.3,
+        no_repeat_ngram_size=3,
     )
 
     generated_text = tokenizer.decode(output_ids[0][prompt_len:], skip_special_tokens=True)
