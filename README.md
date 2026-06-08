@@ -1,186 +1,279 @@
 # LoreForge: Multi-Universe Lore-Faithful Story Generation
 
-## Datasets
-
-### Pretraining
-
-| Dataset | Source | License | Use |
-|---|---|---|---|
-| `manu/project_gutenberg` | HuggingFace | Public domain | Base model pretraining on general English prose (~70k novels) |
+LoreForge is a generative AI system that produces lore-faithful short stories set in the Star Wars, Harry Potter, and Lord of the Rings universes. It combines fine-tuned language models with Retrieval-Augmented Generation (RAG) to ground outputs in canon lore.
 
 ---
 
-### Star Wars
+## How to Run
 
-| Dataset | Source | License | Use |
-|---|---|---|---|
-| `lara-martin/Scifi_TV_Shows` | HuggingFace | CC-BY-4.0 | Fine-tuning + RAG — ~270 Star Wars stories scraped from the Star Wars Fandom wiki, filtered by keyword. Provides lore prose sentences covering characters, events, and locations. |
+### Model Weights
 
----
+The pretrained GPT-2 LoRA adapter weights (all three universes) are hosted on Google Drive:
 
-### Harry Potter
+**[Download weights from Google Drive](https://drive.google.com/drive/folders/1Dy5blXhRucwaBuT6Vrq_SADiKKE1Ae8Z?usp=sharing)**
 
-| Dataset | Source | License | Use |
-|---|---|---|---|
-| `rupanshukapoor/harry-potter-books` | Kaggle | MIT (educational/research only) | Fine-tuning + RAG — Full text of all seven HP books as plain .txt files (~2.5 MB). Teaches narrative style and provides retrievable passages covering characters, spells, locations, and events. |
-
----
-
-### Lord of the Rings
-
-| Dataset | Source | License | Use |
-|---|---|---|---|
-| `jeremyarancio/lotr-book` | HuggingFace | Unstated (educational/research only) | Fine-tuning — Full LOTR trilogy text (pages 45–1055). Teaches the LoRA adapter Tolkien's prose style: archaic diction, elevated register, and the narrative rhythm of Middle-earth. |
-| `wikimedia/wikipedia` (filtered) | HuggingFace | CC BY-SA 3.0 | RAG — English Wikipedia filtered to LOTR-related articles (characters, locations, factions, artifacts). Encyclopedic structure makes these ideal retrieval chunks for grounding generation in canon facts. |
-
----
-
-## GPT-2 Architecture
-
-GPT-2 is a decoder-only transformer — the same fundamental architecture as LoreForge's scratch-trained model, but pretrained by OpenAI on 40GB of web text. The `gpt2` variant used here has 117M parameters.
-
-### Key components
-
-**Token + Position Embeddings**
-Every input token is looked up in a learned embedding table (`model.transformer.wte`, shape `50257 × 768`) and added to a learned positional embedding (`model.transformer.wpe`, shape `1024 × 768`). This gives the model both the identity of each token and its position in the sequence. GPT-2's context window is hard-capped at 1024 tokens by the size of `wpe`.
-
-**Transformer Blocks (`model.transformer.h`)**
-GPT-2 has 12 stacked transformer blocks. Each block contains:
-
-- **Causal Self-Attention** — each token can only attend to tokens that came before it (enforced by a causal mask). This is what makes GPT-2 a language model: it predicts the next token given all previous tokens. The attention mechanism has three projections: `c_attn` (query, key, value combined into one `768 → 2304` projection) and `c_proj` (output projection `768 → 768`). These are the layers that LoRA adapters are applied to.
-- **Layer Normalization** — applied before attention and before the feed-forward network (pre-norm formulation), stabilizing training.
-- **Feed-Forward Network** — two linear layers with a GELU activation: `768 → 3072 → 768`. This is where most of the model's "knowledge" is thought to be stored.
-- **Residual Connections** — both the attention and feed-forward outputs are added back to the block's input, allowing gradients to flow cleanly through deep networks.
-
-**Language Model Head**
-After all 12 blocks, a final layer norm is applied and the output is projected back to vocabulary size (`model.lm_head`, shape `768 → 50257`). The resulting logits represent the unnormalized probability of each token in the vocabulary being the next token.
-
-**Autoregressive Generation**
-At inference time, GPT-2 generates text token by token. Each new token is appended to the input and fed back into the model to produce the next token. LoreForge uses top-k sampling with temperature to control diversity: logits are divided by `temperature`, all but the top-k are masked to `-inf`, and the next token is sampled from the resulting softmax distribution.
-
-### Why LoRA works on GPT-2
-
-LoRA freezes all of GPT-2's 117M base weights and injects small trainable rank decomposition matrices (`lora_A`, `lora_B`) alongside the attention projections. The effective weight update is `ΔW = lora_B @ lora_A * (alpha / rank)`, adding only ~300K trainable parameters per universe instead of fine-tuning all 117M. The base model's English fluency is preserved while the adapter steers the output distribution toward universe-specific vocabulary and style.
-
----
-
-## RAG Pipeline
-
-Retrieval-Augmented Generation (RAG) grounds each story generation in canon lore by fetching the most relevant passages from a universe-specific vector database before calling the model. All RAG code lives in `loreforge_gpt2.py` lines 315–450.
-
-### Step 1 — Chunking (`chunk_documents_for_rag`, line 329)
-
-```python
-ids = tokenizer.encode(doc)
-step = chunk_size - overlap
-for start in range(0, len(ids), step):
-    chunk_ids = ids[start : start + chunk_size]
-    chunks.append(tokenizer.decode(chunk_ids))
-```
-
-The raw corpus text for each universe is first tokenized into token IDs, then split into fixed-size windows of `chunk_size=256` tokens with `overlap=32` tokens between consecutive chunks. The overlap prevents a relevant sentence from being cut in half at a chunk boundary. Each chunk is decoded back to a string and stored as a passage. This produces thousands of short, dense lore excerpts per universe.
-
-### Step 2 — Embedding (`embed_passages`, line 318)
-
-```python
-model = SentenceTransformer(embed_model_name, device=device)
-result = model.encode(passages, batch_size=64, convert_to_numpy=True)
-return result.astype("float32")
-```
-
-Every passage is converted to a dense 384-dimensional vector using `all-MiniLM-L6-v2` from `sentence-transformers`. This model maps semantically similar text to nearby points in vector space — so "Darth Vader's breathing" and "Vader's respirator" would have similar embeddings even though they share no words. Embeddings are computed in batches of 64 for efficiency and returned as a float32 numpy array.
-
-### Step 3 — Indexing (`build_faiss_index`, line 345)
-
-```python
-idx = faiss.IndexFlatL2(embeddings.shape[1])
-idx.add(embeddings)
-faiss.write_index(idx, str(index_path))
-with open(index_dir / f"{universe}_gpt2_passages.json", "w") as f:
-    json.dump(passages, f)
-```
-
-All passage embeddings are loaded into a FAISS `IndexFlatL2` — a flat index that performs exact nearest-neighbour search using L2 (Euclidean) distance. The index and the original passage strings are saved to disk as `{universe}_gpt2.faiss` and `{universe}_gpt2_passages.json`. The passages JSON is kept in parallel so retrieved embedding indices can be mapped back to readable text.
-
-### Step 4 — Retrieval (`retrieve_context`, line 370)
-
-```python
-embed_query = embed_passages([query], embed_model_name=embed_model_name)
-_, indices = faiss_index.search(embed_query, k)
-return [passages[i] for i in indices[0]]
-```
-
-At inference time, the user's prompt is embedded using the same `all-MiniLM-L6-v2` model. `faiss_index.search(embed_query, k)` returns the indices of the `k=3` passages whose embeddings are closest to the query embedding in L2 space. Those passages are retrieved from the parallel passages list and returned as strings.
-
-### Step 5 — Prompt Assembly (`build_generation_prompt`, line 387)
-
-```python
-control_token = UNIVERSES[universe]["control_token"]
-joined_passages = "\n\n".join(retrieved_passages)
-return f"{control_token}\n--- Lore Context ---\n{joined_passages}\n--- Story ---\n{user_prompt}"
-```
-
-The retrieved passages are joined and wrapped in a structured prompt. A universe control token (e.g. `[STAR_WARS]`) is prepended to signal to the model which universe adapter is active. The final prompt fed to GPT-2 looks like:
+Download all three `.pt` files and place them in `data/checkpoints/`:
 
 ```
-[STAR_WARS]
---- Lore Context ---
-<passage 1>
-
-<passage 2>
-
-<passage 3>
---- Story ---
-<user prompt>
+data/checkpoints/
+├── star_wars_gpt2_lora.pt
+├── harry_potter_gpt2_lora.pt
+└── lotr_gpt2_lora.pt
 ```
 
-GPT-2 then continues this text autoregressively, conditioned on both the lore context and the user's prompt. The retrieved passages are also returned to the GUI and displayed alongside the generated story so the user can see which canon lore was used.
+### Prerequisites
 
----
-
-## Training Notes
-
-### GPT-2 Fallback
-
-The project pivoted from a scratch-trained transformer to a pretrained GPT-2 base model (`gpt2`, 117M params) due to Quest HPC queue delays. LoRA adapters are fine-tuned per universe on top of the frozen GPT-2 weights. The RAG pipeline, FAISS indices, and GUI are unchanged.
-
-### LoRA Fine-tuning: Epochs Matter
-
-**Observation:** After only 1 epoch of fine-tuning, model output was incoherent — Star Wars vocabulary was present but grammar was broken.
-
-**Root cause:** 1 epoch is insufficient. The LoRA adapter (lora_B initialized to zeros) began shifting the model's output distribution toward the training data but did not converge. The model was stuck between fluent base GPT-2 English and the training corpus distribution, producing neither coherently.
-
-**Confirmed:** Base GPT-2 with no adapter loaded produces fluent English. The degradation is purely a function of insufficient training epochs, not a bug in the LoRA implementation.
-
-**Fix:** Run a minimum of 3 epochs. The parallel SLURM scripts (`submit_star_wars.sh`, `submit_harry_potter.sh`, `submit_lotr.sh`) each request 1 A100 GPU and run independently so all three universes fine-tune simultaneously.
-
-### Conv1D Compatibility
-
-GPT-2 uses `Conv1D` layers internally (weight shape `(in, out)`) rather than `nn.Linear` (weight shape `(out, in)`). The `LoRALinear` wrapper detects which type it is wrapping and sets `in_features`/`out_features` accordingly. The forward pass `x @ lora_A.T @ lora_B.T` is correct for both layer types.
-
-### Adapter Checkpoint Loading
-
-Adapters saved on Quest CUDA GPUs must be loaded with `map_location="cpu"` on a CPU-only inference machine. The `load_lora_adapter` function in `loreforge_gpt2.py` handles this automatically.
-
-### Context Window Truncation
-
-GPT-2 has a hard 1024-token context window. The RAG prompt (lore passages + user prompt) can exceed this. The `generate_story` function truncates the input to `1024 - max_new_tokens` before calling `model.generate` to prevent an out-of-range position embedding error.
-
----
-
-## Running the GUI
+```bash
+pip install torch transformers sentence-transformers faiss-cpu fastapi uvicorn
+```
 
 ### 1. Start the inference server
 
 ```bash
-arch -arm64 /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 server.py
+python server.py
+# Server runs at http://localhost:8000
 ```
 
 ### 2. Start the React frontend
 
 ```bash
 cd gui
+npm install
 npm run dev
+# Open http://localhost:5173
 ```
 
-Open `http://localhost:3000`. The server auto-detects which universes have trained adapters and marks them as available in the UI.
+The server auto-detects which universes have trained adapters and marks them as available in the UI. Select a universe, enter a prompt, and click Generate.
+
+### Keyboard shortcut
+
+`⌘ + Enter` (Mac) or `Ctrl + Enter` (Windows) submits a prompt.
+
+---
+
+## Project Overview
+
+LoreForge went through two major iterations. The first attempted to train a transformer completely from scratch with Hyperband hyperparameter optimization. Due to Quest HPC constraints, the project pivoted to a pretrained GPT-2 base in the second iteration.
+
+---
+
+## Iteration 1: From-Scratch Transformer
+
+**Files:** [`loreforge.py`](loreforge.py), [`train.py`](train.py), [`submit.sh`](submit.sh)
+
+### Goal
+
+Train a custom GPT-style decoder-only transformer from scratch on the Project Gutenberg corpus, then LoRA fine-tune it per universe for lore-faithful generation.
+
+### Model Architecture — LoreForgeTransformer
+
+A custom decoder-only transformer built in PyTorch, targeting ~50M parameters.
+
+| Hyperparameter | Target Value |
+|---|---|
+| Layers (`n_layers`) | 6 |
+| Attention heads (`n_heads`) | 8 |
+| Model dimension (`d_model`) | 512 |
+| Context length | 2048 tokens |
+| FFN hidden size | 4 × d_model = 2048 |
+| Vocabulary size | 16,000 (custom BPE) |
+
+**Components:**
+- `CausalSelfAttention` — multi-head scaled dot-product attention with a causal (upper-triangular) mask. Uses PyTorch's `scaled_dot_product_attention` (FlashAttention when available)
+- `TransformerBlock` — pre-norm formulation (LayerNorm before each sublayer) with residual connections
+- `LoreForgeTransformer` — token + position embeddings → N× TransformerBlock → LayerNorm → LM head with tied weights
+
+### Tokenizer
+
+A custom BPE tokenizer (16k vocab) trained on the combined Gutenberg + universe corpus using HuggingFace `tokenizers`. Universe control tokens (`[STAR_WARS]`, `[HARRY_POTTER]`, `[LOTR]`) are added as special tokens so they are never split by BPE.
+
+### Hyperband HPO (Ray Tune)
+
+Hyperparameters were tuned using Ray Tune's `ASHAScheduler` (Asynchronous Successive Halving — a Hyperband variant). The search space covered:
+- Learning rate: log-uniform `[1e-4, 1e-2]`
+- Batch size: `{32, 64, 128}`
+- `d_model`: `{256, 512}`
+- `n_layers`: `{4, 6, 8}`
+- `n_heads`: `{4, 8}`
+- Dropout: uniform `[0.05, 0.2]`
+
+ASHAScheduler aggressively prunes poor-performing trials early, allocating more compute to promising configurations.
+
+### Pretraining
+
+The model was pretrained on the `manu/project_gutenberg` dataset (~70k public-domain English novels) using a binary memory-mapped dataset (`data/processed/pretrain.bin`). Checkpoints are saved after each epoch as `checkpoints/pretrain_epoch{n}.pt`.
+
+### LoRA Fine-tuning (Scratch Model)
+
+After pretraining, LoRA adapters were applied to the QKV and output projection layers of each attention block (rank=8, alpha=16). Only the LoRA A/B matrices (~300K params) are trained per universe; the base model weights are frozen.
+
+### What Went Wrong
+
+**Hyperband HPO took too long.** Each trial required running pretraining from scratch on the Gutenberg corpus. On Quest, individual A100 GPU jobs had queue wait times of 24+ hours. With 8 Hyperband trials and multiple epochs each, the HPO phase alone consumed the majority of the project timeline.
+
+**Pretraining from scratch was too slow.** Even with the `pretrain_max_docs=2000` limit, full pretraining required compute that couldn't be completed within the project deadline.
+
+**Decision:** Pivot to a pretrained GPT-2 base model that already has English fluency, and only fine-tune LoRA adapters (~hours per universe, not days).
+
+---
+
+## Iteration 2: Pretrained GPT-2
+
+**Files:** [`loreforge_gpt2.py`](loreforge_gpt2.py), [`finetune_gpt2.py`](finetune_gpt2.py), [`submit_star_wars.sh`](submit_star_wars.sh), [`submit_harry_potter.sh`](submit_harry_potter.sh), [`submit_lotr.sh`](submit_lotr.sh), [`server.py`](server.py), [`gui/src/App.jsx`](gui/src/App.jsx)
+
+### Goal
+
+Replace the from-scratch pretraining step with OpenAI's pretrained GPT-2 (117M params), then fine-tune lightweight LoRA adapters per universe. The RAG pipeline and inference architecture remain unchanged.
+
+### GPT-2 Architecture
+
+GPT-2 is a decoder-only transformer pretrained by OpenAI on 40GB of web text (WebText corpus).
+
+| Property | Value |
+|---|---|
+| Model ID | `gpt2` (HuggingFace) |
+| Total parameters | 117M (frozen during fine-tuning) |
+| Transformer layers | 12 |
+| Attention heads | 12 per layer |
+| Hidden size (`d_model`) | 768 |
+| FFN hidden size | 3,072 (4 × d_model) |
+| Context window | 1,024 tokens (hard limit) |
+| Vocabulary | 50,257 BPE tokens |
+| Attention projection | `c_attn`: 768→2,304 (QKV fused), `c_proj`: 768→768 |
+| Layer implementation | `Conv1D` (weight shape `[in, out]`, opposite of `nn.Linear`) |
+
+**Why the Conv1D distinction matters:** GPT-2's attention layers use `transformers.Conv1D` internally, which stores weights transposed compared to `nn.Linear`. The `LoRALinear` wrapper in `loreforge_gpt2.py` detects which type it is wrapping and handles both shapes correctly.
+
+### LoRA Fine-tuning (GPT-2)
+
+LoRA adapters are applied to `c_attn` and `c_proj` in all 12 transformer blocks:
+- Rank: 8
+- Alpha: 16 (effective scale = 16/8 = 2.0)
+- Trainable parameters: ~300K per universe (vs 117M base weights)
+- Training: AdamW, cosine decay with 100-step linear warmup, gradient clipping at 1.0
+
+The base GPT-2 weights are frozen. Only the LoRA A/B matrices are updated.
+
+### SLURM Fine-tuning Jobs
+
+Three independent jobs run in parallel on Quest, one per universe:
+
+| Script | Universe | Epochs | Notes |
+|---|---|---|---|
+| `submit_star_wars.sh` | star_wars | 2 | `--resume --skip_rag` (index pre-exists) |
+| `submit_harry_potter.sh` | harry_potter | 3 | Builds FAISS index after training |
+| `submit_lotr.sh` | lotr | 3 | Builds FAISS index after training |
+
+Each job requests 1× A100 GPU, 64GB RAM, 24-hour time limit on the `gengpu` partition.
+
+**Quest environment issues encountered:**
+- `finetune_gpt2.py` missing from cluster → copied with `scp`
+- Home directory quota exceeded by NVIDIA CUDA packages → redirected via `PYTHONUSERBASE` and `HF_HOME` to `/projects`
+- HuggingFace model download cache defaulting to `$HOME` → fixed by setting env vars before Python import
+
+### RAG Pipeline
+
+Retrieval-Augmented Generation grounds each story in canon lore by fetching relevant passages before calling the model.
+
+**Step 1 — Chunking** (`chunk_documents_for_rag`): The raw corpus is tokenized and split into 256-token windows with 32-token overlap to avoid cutting mid-sentence.
+
+**Step 2 — Embedding** (`embed_passages`): Each passage is encoded into a 384-dimensional vector using `all-MiniLM-L6-v2` (sentence-transformers). Semantically similar passages cluster together in this space.
+
+**Step 3 — Indexing** (`build_faiss_index`): All embeddings are stored in a FAISS `IndexFlatL2` (exact nearest-neighbour search). The index and parallel passage strings are saved to `data/indices/{universe}_gpt2.faiss` and `{universe}_gpt2_passages.json`.
+
+**Step 4 — Retrieval** (`retrieve_context`): At inference time, the user prompt is embedded and the top-k=5 nearest passages are returned.
+
+**Step 5 — Prompt Assembly** (`build_generation_prompt`): Retrieved passages are injected into the prompt with an explicit narrative instruction to prevent the model from generating encyclopedia-style output (a known issue when training on wiki/fandom corpora).
+
+### Datasets
+
+#### Pretraining (from-scratch iteration only)
+
+| Dataset | Source | License | Use |
+|---|---|---|---|
+| `manu/project_gutenberg` | HuggingFace | Public domain | Base model pretraining (~70k novels) |
+
+#### Star Wars
+
+| Dataset | Source | License | Use |
+|---|---|---|---|
+| `lara-martin/Scifi_TV_Shows` (filtered) | HuggingFace | CC-BY-4.0 | Fine-tuning + RAG — ~270 Star Wars stories scraped from the Star Wars Fandom wiki |
+
+#### Harry Potter
+
+| Dataset | Source | License | Use |
+|---|---|---|---|
+| `rupanshukapoor/harry-potter-books` | Kaggle | MIT (educational/research only) | Fine-tuning + RAG — Full text of all seven HP books (~2.5 MB) |
+
+#### Lord of the Rings
+
+| Dataset | Source | License | Use |
+|---|---|---|---|
+| `jeremyarancio/lotr-book` | HuggingFace | Educational/research only | Fine-tuning — Full LOTR trilogy (pages 45–1055) |
+| `wikimedia/wikipedia` (filtered) | HuggingFace | CC BY-SA 3.0 | RAG — English Wikipedia filtered to LOTR-related articles |
+
+### Inference Server (`server.py`)
+
+A FastAPI server that:
+- Loads models lazily on first request per universe (avoids loading all three at startup)
+- Auto-detects the available backend (GPT-2 adapter vs from-scratch adapter)
+- Exposes `GET /universes` and `POST /generate` endpoints
+- Supports CORS for the React frontend
+
+### React GUI (`gui/src/App.jsx`)
+
+A single-page chat interface built with React + Vite:
+- Universe picker with per-universe theme colors
+- Chat history with animated loading indicator
+- Collapsible lore passages panel showing which canon text was retrieved
+- Settings controls: max tokens, temperature, RAG on/off toggle
+- `⌘/Ctrl + Enter` keyboard shortcut
+
+### Output Quality Issues
+
+**Problem:** Generated output often resembled encyclopedia articles rather than narrative fiction.
+
+**Root cause:** The fine-tuning corpus (Star Wars wiki articles, Harry Potter Fandom articles) was largely encyclopedic text with citation markers (`[48]`, `[B]`). GPT-2 learned to generate in that style.
+
+**Mitigations applied:**
+- Added `repetition_penalty=1.3` and `no_repeat_ngram_size=3` to `model.generate()` to break repetition collapse
+- Added an explicit narrative instruction to `build_generation_prompt` telling the model to write as a story, not an article
+
+**Remaining limitation:** The prompt framing helps but cannot fully overcome the style learned from training data. Retraining on narrative fiction datasets (fan fiction, actual book text without wiki markup) would be the proper fix.
+
+---
+
+## File Reference
+
+| File | Purpose |
+|---|---|
+| `loreforge.py` | Full from-scratch pipeline: data, tokenizer, transformer, Hyperband HPO, LoRA, RAG, inference |
+| `train.py` | Entry point that calls `run_training_pipeline()` in `loreforge.py` |
+| `loreforge_gpt2.py` | GPT-2 pipeline: LoRA fine-tuning on frozen GPT-2, RAG, inference |
+| `finetune_gpt2.py` | SLURM-friendly CLI entry point for per-universe GPT-2 fine-tuning |
+| `server.py` | FastAPI inference server serving the React GUI |
+| `gui/src/App.jsx` | React single-page chat interface |
+| `submit_star_wars.sh` | SLURM job: Star Wars fine-tuning (2 epochs, resume, skip RAG) |
+| `submit_harry_potter.sh` | SLURM job: Harry Potter fine-tuning (3 epochs) |
+| `submit_lotr.sh` | SLURM job: Lord of the Rings fine-tuning (3 epochs) |
+| `submit.sh` | SLURM job: original from-scratch DDP pretraining (4× A100) |
+
+---
+
+## Training Notes
+
+### LoRA Epochs Matter
+
+After 1 epoch, model output was incoherent — universe vocabulary was present but grammar was broken. The LoRA B matrix (initialized to zero) had not converged enough to shift the output distribution coherently. A minimum of 3 epochs is required.
+
+### Adapter Checkpoint Loading
+
+Adapters saved on Quest CUDA GPUs are loaded with `map_location="cpu"` on a CPU-only inference machine. `load_lora_adapter` in `loreforge_gpt2.py` handles this automatically.
+
+### Context Window Truncation
+
+GPT-2 has a hard 1024-token context window. The RAG prompt (lore passages + user prompt) can exceed this. `generate_story` truncates the input to `1024 - max_new_tokens` tokens before calling `model.generate` to prevent an out-of-range position embedding error.
+
+### Conv1D Compatibility
+
+GPT-2 uses `Conv1D` layers (weight shape `[in, out]`) rather than `nn.Linear` (`[out, in]`). The `LoRALinear` wrapper detects which type it is wrapping by comparing the two dimensions and sets `in_features`/`out_features` accordingly.

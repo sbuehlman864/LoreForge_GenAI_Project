@@ -1,14 +1,26 @@
 """
-LoreForge inference server.
-Runs locally (or on Quest via port forwarding) to serve the React GUI.
+LoreForge inference server — FastAPI backend for the React GUI.
 
-Start:
+Serves two endpoints:
+    GET  /universes  → returns which universes have trained adapters and which
+                       backend (gpt2 or scratch) will be used for each
+    POST /generate   → runs the full RAG + generation pipeline and returns
+                       the generated story text + retrieved lore passages
+
+Models are loaded lazily on first request per universe and cached in memory
+so subsequent requests to the same universe don't re-load from disk.
+
+The server auto-detects whether a GPT-2 adapter or a from-scratch adapter
+is available, preferring GPT-2 when both exist.
+
+Start locally:
     pip install fastapi uvicorn
     python server.py
+    # → http://localhost:8000
 
-Endpoints:
-    GET  /universes            → list of available universes
-    POST /generate             → run inference and return story + context
+On Quest (via SSH port forwarding):
+    ssh -L 8000:localhost:8000 <netid>@quest.northwestern.edu
+    python server.py  # run on the compute node
 """
 
 import json
@@ -33,27 +45,35 @@ UNIVERSE_LABELS = {
     "lotr":         "Lord of the Rings",
 }
 
-# ── Detect which model backend is available ────────────────────────────────────
+# ── Backend detection helpers ──────────────────────────────────────────────────
+# These functions check for the presence of adapter checkpoint and FAISS index
+# files to determine which backend (gpt2 vs scratch) is available for each universe.
 
 def _gpt2_adapter_exists(universe: str) -> bool:
+    # GPT-2 adapters are saved as {universe}_gpt2_lora.pt by finetune_gpt2.py
     return (CHECKPOINTS_DIR / f"{universe}_gpt2_lora.pt").exists()
 
 def _scratch_adapter_exists(universe: str) -> bool:
+    # From-scratch adapters are saved as {universe}_lora.pt by loreforge.py
     return (CHECKPOINTS_DIR / f"{universe}_lora.pt").exists()
 
 def _gpt2_index_exists(universe: str) -> bool:
+    # Accept either the gpt2-suffixed index or the fallback non-suffixed index.
+    # The fallback exists when the scratch pipeline built the index but the gpt2
+    # pipeline has not yet run (e.g. harry_potter, lotr after initial finetuning).
     return (INDICES_DIR / f"{universe}_gpt2.faiss").exists() or (INDICES_DIR / f"{universe}.faiss").exists()
 
 def _scratch_index_exists(universe: str) -> bool:
     return (INDICES_DIR / f"{universe}.faiss").exists()
 
 def _universe_available(universe: str) -> bool:
+    # A universe is available if EITHER backend has both adapter + index present
     gpt2_ready    = _gpt2_adapter_exists(universe) and _gpt2_index_exists(universe)
     scratch_ready = _scratch_adapter_exists(universe) and _scratch_index_exists(universe)
     return gpt2_ready or scratch_ready
 
 def _universe_backend(universe: str) -> str:
-    """Return 'gpt2' or 'scratch', preferring whichever is available."""
+    """Return 'gpt2' or 'scratch', preferring GPT-2 when both are available."""
     if _gpt2_adapter_exists(universe) and _gpt2_index_exists(universe):
         return "gpt2"
     if _scratch_adapter_exists(universe) and _scratch_index_exists(universe):
@@ -61,9 +81,9 @@ def _universe_backend(universe: str) -> str:
     return "none"
 
 # ── Model cache ───────────────────────────────────────────────────────────────
-# Models are loaded lazily on first use to avoid loading all three at startup.
-# Each entry: { "model": ..., "tokenizer": ..., "faiss_index": ..., "passages": ... }
-
+# Models are loaded lazily on first request per universe — avoids loading all three
+# at startup (slow, memory-intensive) when the user may only visit one universe.
+# Each cache entry holds the loaded model, tokenizer, FAISS index, and passages list.
 _model_cache: dict = {}
 
 def _load_universe(universe: str, device: torch.device):

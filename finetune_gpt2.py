@@ -1,18 +1,29 @@
-"""
-Single-universe GPT-2 LoRA fine-tuning script.
-Designed to be called from a SLURM job, one job per universe.
-
-Usage:
-    python finetune_gpt2.py --universe star_wars --n_epochs 2 --resume
-    python finetune_gpt2.py --universe harry_potter --n_epochs 3
-    python finetune_gpt2.py --universe lotr --n_epochs 3
-"""
+# =============================================================================
+# finetune_gpt2.py — SLURM entry point for single-universe GPT-2 LoRA fine-tuning
+# =============================================================================
+# Designed to be submitted as an independent SLURM job, one per universe.
+# Running three jobs in parallel (star_wars, harry_potter, lotr) cuts wall-clock
+# time to the slowest single job rather than the sum of all three.
+#
+# Each job:
+#   1. Loads the frozen GPT-2 base model and applies LoRA adapters
+#   2. Optionally resumes from an existing adapter checkpoint (--resume)
+#   3. Fine-tunes the LoRA adapters on the universe corpus
+#   4. Optionally builds a FAISS RAG index for the universe (--skip_rag to bypass)
+#
+# Usage (on Quest):
+#   sbatch submit_star_wars.sh    # --universe star_wars --n_epochs 2 --resume --skip_rag
+#   sbatch submit_harry_potter.sh # --universe harry_potter --n_epochs 3
+#   sbatch submit_lotr.sh         # --universe lotr --n_epochs 3
+# =============================================================================
 
 import argparse
 import os
 import torch
 from transformers import GPT2LMHeadModel
 
+# Must be set BEFORE importing transformers/HuggingFace libraries so the cache
+# is redirected to /projects (large quota) instead of $HOME (small quota on Quest)
 os.environ["HF_HOME"] = "/projects/e32706/jgu2930/.cache/huggingface"
 os.environ["HF_DATASETS_CACHE"] = "/projects/e32706/jgu2930/.cache/huggingface/datasets"
 os.environ["KAGGLE_USERNAME"] = "spencerbuehlman864"
@@ -38,11 +49,15 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
 print(f"Universe: {args.universe} | Epochs: {args.n_epochs} | Resume: {args.resume}")
 
+# Load the GPT-2 base model and wrap attention projections with LoRA adapters.
+# apply_lora_adapters_gpt2 freezes all base weights and makes only A/B trainable.
 tokenizer = load_gpt2_tokenizer(GPT2_MODEL_NAME)
 model = GPT2LMHeadModel.from_pretrained(GPT2_MODEL_NAME)
 model = apply_lora_adapters_gpt2(model)
 
 if args.resume:
+    # --resume allows continuing a previously interrupted fine-tuning run.
+    # Useful when the SLURM job hit its time limit before completing all epochs.
     adapter_path = CHECKPOINTS_DIR / f"{args.universe}_gpt2_lora.pt"
     if adapter_path.exists():
         print(f"Resuming from existing adapter: {adapter_path}")
@@ -60,12 +75,16 @@ model = finetune_lora_gpt2(
 
 print(f"Adapter saved for {args.universe}.")
 
-# Build FAISS index if not already present
+# Build FAISS RAG index after fine-tuning so inference can retrieve lore passages.
+# --skip_rag is used when the index already exists (e.g. for star_wars which had
+# a pre-existing index from an earlier run).
 if not args.skip_rag:
     index_path = INDICES_DIR / f"{args.universe}_gpt2.faiss"
     if not index_path.exists():
         print(f"Building FAISS index for {args.universe}...")
         texts = load_corpus_texts(args.universe)
+        # Chunk → embed → index pipeline: splits corpus into 256-token passages,
+        # embeds with all-MiniLM-L6-v2, and saves a flat L2 FAISS index to disk
         passages = chunk_documents_for_rag(texts, tokenizer)
         embeddings = embed_passages(passages)
         build_faiss_index(args.universe, passages, embeddings)

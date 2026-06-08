@@ -1,12 +1,29 @@
+// =============================================================================
+// App.jsx — LoreForge React frontend
+// =============================================================================
+// Single-page chat interface for the LoreForge story generation API.
+// Talks to the FastAPI server (server.py) running on localhost:8000.
+//
+// Layout:
+//   Header       — title + subtitle
+//   Universe Picker — clickable cards for each universe (disabled if not trained)
+//   Chat History — scrollable list of prompt/response pairs with lore passage toggle
+//   Error Banner — dismissable error messages from the API
+//   Input Footer — prompt textarea, settings controls (tokens, temp, RAG), generate button
+// =============================================================================
+
 import { useState, useEffect, useRef } from "react";
 
+// Universe-specific theme colors and emoji displayed in the picker and chat bubbles
 const UNIVERSE_META = {
   star_wars:    { emoji: "⭐", color: "#FFE81F", bg: "#0d0d1a" },
   harry_potter: { emoji: "⚡", color: "#AE0001", bg: "#1a0a0a" },
   lotr:         { emoji: "💍", color: "#C0962C", bg: "#0a110a" },
 };
 
-const API = "";  // proxied by Vite; change to "http://localhost:8000" if running standalone
+// Empty string = Vite proxies /universes and /generate to localhost:8000
+// Set to "http://localhost:8000" if running the frontend standalone (no Vite proxy)
+const API = "";
 
 export default function App() {
   const [universes, setUniverses]     = useState([]);
@@ -17,10 +34,10 @@ export default function App() {
   const [error, setError]             = useState(null);
   const [maxTokens, setMaxTokens]     = useState(256);
   const [temperature, setTemperature] = useState(0.9);
-  const [useRag, setUseRag]           = useState(true);
-  const bottomRef = useRef(null);
+  const [useRag, setUseRag]           = useState(true); // toggle RAG on/off per request
+  const bottomRef = useRef(null);  // used to auto-scroll to latest message
 
-  // Load universe list on mount
+  // On mount, fetch the list of universes from the server and auto-select the first available one
   useEffect(() => {
     fetch(`${API}/universes`)
       .then(r => r.json())
@@ -32,7 +49,7 @@ export default function App() {
       .catch(() => setError("Could not reach the LoreForge server. Is server.py running?"));
   }, []);
 
-  // Scroll to bottom when history changes
+  // Scroll to the bottom of the chat area whenever a new message is added
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [history]);
@@ -42,6 +59,7 @@ export default function App() {
     setLoading(true);
     setError(null);
 
+    // Optimistically add the entry with result=null so the loading dots appear immediately
     const entry = { id: Date.now(), universe: selected, prompt: prompt.trim(), result: null };
     setHistory(h => [...h, entry]);
     setPrompt("");
@@ -56,7 +74,7 @@ export default function App() {
           max_new_tokens: maxTokens,
           temperature: temperature,
           top_k: 50,
-          use_rag: useRag,
+          use_rag: useRag,  // controlled by the RAG checkbox in the footer
         }),
       });
       if (!res.ok) {
@@ -64,6 +82,7 @@ export default function App() {
         throw new Error(detail);
       }
       const result = await res.json();
+      // Replace the placeholder entry with the actual result using the stable id
       setHistory(h => h.map(e => e.id === entry.id ? { ...e, result } : e));
     } catch (err) {
       setError(err.message);

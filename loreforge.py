@@ -1,8 +1,28 @@
 # =============================================================================
 # LoreForge: Multi-Universe Lore-Faithful Story Generation
 # =============================================================================
-# Main pipeline: data download → preprocessing → tokenizer → pretraining →
-# LoRA fine-tuning → RAG index construction → inference
+# ITERATION 1 — FROM-SCRATCH MODEL
+#
+# This file implements the original LoreForge pipeline: a custom GPT-style
+# decoder-only transformer trained entirely from scratch on the Project
+# Gutenberg corpus, then LoRA fine-tuned per universe.
+#
+# Pipeline stages:
+#   1. Data download  — Gutenberg (pretraining), Wikipedia/HP/LOTR (fine-tuning)
+#   2. Preprocessing  — wiki markup cleaning, binary tokenization
+#   3. Tokenizer      — custom BPE (16k vocab) trained on combined corpus
+#   4. Architecture   — LoreForgeTransformer (~50M params, 6L/8H/512D)
+#   5. Pretraining    — causal LM on Gutenberg, DDP-capable
+#   6. Hyperband HPO  — Ray Tune ASHAScheduler over lr/d_model/n_layers/etc.
+#   7. LoRA fine-tuning — per-universe adapters on frozen pretrained weights
+#   8. RAG            — FAISS flat-L2 index over sentence-transformer embeddings
+#   9. Inference      — top-k sampling with temperature
+#
+# WHY THIS ITERATION WAS ABANDONED:
+#   Hyperband HPO + pretraining from scratch required hundreds of GPU-hours.
+#   Quest HPC queue wait times (often 24+ h per job) made iteration impossible
+#   within the course timeline. The project pivoted to a pretrained GPT-2 base
+#   (see loreforge_gpt2.py) to allow fine-tuning runs to complete in hours.
 #
 # Author: Spencer Lepine
 # Course: Generative AI — Northwestern MSAI
@@ -233,33 +253,6 @@ def download_lotr_wikipedia(split: str = "train") -> object:
     return lotr_dataset
 
 
-def download_tlou_corpus(dest_dir: pathlib.Path = RAW_DIR) -> pathlib.Path:
-    """[STUB] Acquire The Last of Us community game scripts (stretch goal).
-
-    Community-sourced transcripts for TLOU Parts I and II, supplemented by
-    the TLOU wiki. These do not have a single canonical download source; they
-    must be assembled manually.
-
-    Manual steps:
-        1. Locate community script transcripts (fan sites, GitHub repos, etc.).
-        2. Download the TLOU wiki dump from the relevant fandom/wiki export.
-        3. Combine and place all text files under: data/raw/tlou/
-
-    Args:
-        dest_dir: Directory to store raw corpus files.
-
-    Returns:
-        Expected directory path.
-
-    Raises:
-        NotImplementedError: Stretch goal — not required for initial submission.
-    """
-    expected_path = dest_dir / "tlou"
-    raise NotImplementedError(
-        "TLOU corpus is a stretch goal. Assemble scripts manually and place under "
-        f"{expected_path}"
-    )
-
 
 # =============================================================================
 # 2. PREPROCESSING
@@ -283,28 +276,33 @@ def clean_wiki_markup(text: str) -> str:
     Returns:
         Clean plain-English prose string.
     """
-    # Strip {{}} blocks
+    # Iteratively strip nested {{template}} blocks (e.g. {{Infobox character|...}})
+    # A single-pass regex can't handle arbitrary nesting, so loop until clean
     while '{{' in text:
         text = re.sub(r'\{\{[^{}]*\}\}', '', text)
-    
-    # Drop tags whose content should be removed entirely
+
+    # Remove tags where the content itself is non-prose (citations, galleries, math)
     text = re.sub(r'<(ref|gallery|math|score)[^>]*>.*?</\1>', '', text, flags=re.DOTALL)
 
-    # Strip all remaining HTML tags (keep the text between them)
+    # Strip any remaining HTML tags but keep the text between them (e.g. <b>Frodo</b> → Frodo)
     text = re.sub(r'<[^>]+>', '', text)
 
-    text = re.sub(r'\[\[([^\]|]+)\|([^\]]+)\]\]', lambda m: m.group(2), text)  # [[target|display]] → display
-    text = re.sub(r'\[\[([^\]]+)\]\]', lambda m: m.group(1), text)              # [[target]] → target
+    # Resolve wikilinks: [[target|display text]] → display text, [[target]] → target
+    text = re.sub(r'\[\[([^\]|]+)\|([^\]]+)\]\]', lambda m: m.group(2), text)
+    text = re.sub(r'\[\[([^\]]+)\]\]', lambda m: m.group(1), text)
 
+    # Drop bare external links — they add noise with no prose value
     text = re.sub(r'\[https?://[^\]]*\]', '', text)
 
-    text = re.sub(r'^\s*(\{\||\|\}|\|!?|!)[^\n]*', '', text, flags=re.MULTILINE) # Strip wiki table syntax
+    # Strip wiki table syntax lines ({|, |}, |, !)
+    text = re.sub(r'^\s*(\{\||\|\}|\|!?|!)[^\n]*', '', text, flags=re.MULTILINE)
 
-    text = re.sub(r"'{2,3}", '', text)          # '''bold''' and ''italic''
-    text = re.sub(r'={2,6}[^=\n]+={2,6}', '', text)  # == Headings ==
-    text = re.sub(r'^\s*[*#:;]+', '', text, flags=re.MULTILINE)  # bullets and list markers
+    text = re.sub(r"'{2,3}", '', text)          # '''bold''' and ''italic'' markers
+    text = re.sub(r'={2,6}[^=\n]+={2,6}', '', text)  # == Section Headings ==
+    text = re.sub(r'^\s*[*#:;]+', '', text, flags=re.MULTILINE)  # list/indent markers
 
-    text = re.sub(r'\n{3,}', '\n\n', text)  # collapse 3+ blank lines to 2
+    # Normalize whitespace — collapse 3+ consecutive blank lines to 2
+    text = re.sub(r'\n{3,}', '\n\n', text)
     text = text.strip()
 
     return text
@@ -334,17 +332,19 @@ def prepare_pretraining_data(
     eos_id = tokenizer.token_to_id("[EOS]")
 
     if max_docs is not None:
+        # Shuffle with fixed seed for reproducibility before truncating
         dataset = dataset.shuffle(seed=42).select(range(min(max_docs, len(dataset))))
         print(f"      Using {len(dataset)} documents for pretraining")
 
-    # Write incrementally in chunks to avoid loading entire corpus into RAM
+    # Write token IDs incrementally to avoid loading the full ~70k-novel corpus into RAM.
+    # Tokens are stored as uint16 (max value 65535 > our 16k vocab), halving disk vs int32.
     CHUNK_SIZE = 100_000
     buffer = []
     with open(out_path, "wb") as f:
         for row in dataset:
             ids = tokenizer.encode(row["text"]).ids
             buffer.extend(ids)
-            buffer.append(eos_id)
+            buffer.append(eos_id)  # document boundary marker — tells model where novels end
             if len(buffer) >= CHUNK_SIZE:
                 np.array(buffer, dtype=np.uint16).tofile(f)
                 buffer = []
@@ -454,18 +454,18 @@ def train_bpe_tokenizer(
     Returns:
         Trained and saved Tokenizer object.
     """
-    # Create tokenizer and trainer
     tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
-    tokenizer.pre_tokenizer = Whitespace()
+    tokenizer.pre_tokenizer = Whitespace()  # split on whitespace before BPE merges
 
-    # Define our UNK and EOS tokens
+    # Universe control tokens ([STAR_WARS], [HARRY_POTTER], etc.) are added as special tokens
+    # so BPE never splits them — they're treated as single atomic units at encode time
     special_tokens = ["[UNK]", "[EOS]"] + [v["control_token"] for v in UNIVERSES.values()]
     trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens)
 
-    # Train tokenizer
+    # BPE learns merge rules from the combined Gutenberg + universe corpus so the
+    # vocabulary covers both general English prose and universe-specific proper nouns
     tokenizer.train_from_iterator(texts, trainer=trainer)
 
-    # Save and return
     tokenizer.save(str(save_path))
     return tokenizer
 
@@ -504,15 +504,18 @@ class CausalSelfAttention(nn.Module):
             dropout:     Attention dropout probability.
         """
         super().__init__()
-        assert d_model % n_heads == 0
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
         self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
+        self.head_dim = d_model // n_heads  # each head attends over a d_model/n_heads slice
 
-        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False) # projects input to Q,K, and V
+        # Single fused projection for Q, K, V — more efficient than three separate linears
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
         self.dropout = nn.Dropout(dropout)
 
-        # Causal mask of upper triangle of -inf so future positions masked out
+        # Upper-triangular mask filled with -inf: position i cannot see position j > i.
+        # Stored as a buffer (not a parameter) so it moves to GPU with .to(device) but
+        # is not updated by the optimizer.
         mask = torch.triu(torch.full((context_len, context_len), float('-inf')), diagonal=1)
         self.register_buffer("mask", mask)
 
@@ -526,18 +529,20 @@ class CausalSelfAttention(nn.Module):
         Returns:
             Output tensor of shape (batch, seq_len, d_model).
         """
-        B, T, C = x.shape # batch, seq_len, d_model
+        B, T, C = x.shape  # batch size, sequence length, d_model
 
-        # Project to Q,K,V and split
+        # Single matmul produces Q, K, V concatenated; chunk splits along last dim
         q, k, v = self.qkv(x).chunk(3, dim=-1)
 
-        # Reshape to (batch, n_heads, seq_len, head_dim)
+        # Reshape from (B, T, d_model) → (B, n_heads, T, head_dim) for multi-head attention
         def reshape(t):
-            return t.view(B,T, self.n_heads, self.head_dim).transpose(1,2)
-        
+            return t.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+
         q, k, v = reshape(q), reshape(k), reshape(v)
 
-        # Flash Attention via PyTorch SDPA — handles masking, scaling, and dropout internally
+        # PyTorch's scaled_dot_product_attention uses FlashAttention when available —
+        # memory-efficient O(N) attention that avoids materializing the full NxN matrix.
+        # is_causal=True applies the autoregressive mask internally.
         output = torch.nn.functional.scaled_dot_product_attention(
             q, k, v,
             dropout_p=self.dropout.p if self.training else 0.0,
@@ -567,14 +572,18 @@ class TransformerBlock(nn.Module):
         self.attention = CausalSelfAttention(d_model, n_heads, context_len, dropout)
         self.ln2 = nn.LayerNorm(d_model)
 
+        # FFN expands to 4× hidden dim (standard transformer convention), applies GELU,
+        # then projects back — this is where most factual "knowledge" is thought to be stored
         self.ffnn = nn.Sequential(
             nn.Linear(d_model, 4 * d_model),
-            nn.GELU(), # Gaussian Error Linear Unit, smoother than ReLu 
-            nn.Linear(4*d_model, d_model),
+            nn.GELU(),  # smoother than ReLU; used in GPT-2 and most modern transformers
+            nn.Linear(4 * d_model, d_model),
             nn.Dropout(dropout)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Pre-norm: LayerNorm is applied BEFORE each sublayer (not after, as in original paper)
+        # Residual connections (x + ...) allow gradients to bypass deep blocks
         x = x + self.attention(self.ln1(x))
         x = x + self.ffnn(self.ln2(x))
         return x
@@ -618,7 +627,9 @@ class LoreForgeTransformer(nn.Module):
         self.ln_final = nn.LayerNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
 
-        # Tie weights so token embedding and lm_head share same matrix
+        # Weight tying: lm_head and token_emb share the same parameter matrix.
+        # This reduces parameters by vocab_size × d_model (~8M for 16k vocab, 512d)
+        # and has been shown to improve language model perplexity.
         self.lm_head.weight = self.token_emb.weight
 
     def forward(
@@ -678,20 +689,28 @@ class PretrainDataset(Dataset):
             context_len: Number of tokens per training sample (x = tokens[i:i+ctx],
                          y = tokens[i+1:i+ctx+1]).
         """
-        # Memory-map the binary file so only accessed parts loaded to RAM
+        # np.memmap maps the file into virtual memory — only the pages actually accessed
+        # are loaded from disk, keeping RAM usage constant regardless of corpus size
         self.data = np.memmap(bin_path, dtype=np.uint16, mode='r')
         self.context_len = context_len
 
     def __len__(self) -> int:
+        # Each sample needs context_len + 1 tokens (input + label), so last valid
+        # start index is len - context_len - 1
         return len(self.data) - self.context_len
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        # Read a (context_len + 1) window; x is the input, y is x shifted right by 1.
+        # The model predicts token[i+1] given tokens[0..i] — standard causal LM objective.
         chunk = torch.from_numpy(self.data[idx : idx + self.context_len + 1].astype(np.int64))
-        x = chunk[:-1] # all tokens except last
-        y = chunk[1:] # all tokens except the first (shifted by one)
+        x = chunk[:-1]  # input: tokens 0..context_len-1
+        y = chunk[1:]   # target: tokens 1..context_len (next-token prediction)
         return x, y
 
 
+# Cosine decay with warmup is the standard LR schedule for transformers.
+# Warmup prevents large gradient updates from random initial weights from
+# destabilizing training in the first few hundred steps.
 def build_lr_schedule(optimizer, warmup_steps: int, total_steps: int):
     """Return a cosine decay scheduler with linear warmup.
 
@@ -833,6 +852,10 @@ def pretrain(
 
     return model.module if world_size > 1 else model
 
+# ray_train_wrapper is the function Ray Tune calls for each Hyperband trial.
+# It accepts a sampled config dict, builds a model with those hyperparameters,
+# trains for config["max_epochs"] epochs, and reports loss to the scheduler.
+# Ray Tune's ASHAScheduler then decides whether to continue or prune the trial.
 def ray_train_wrapper(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -898,6 +921,10 @@ def hyperband_search(
     Raises:
         NotImplementedError: Until Ray Tune integration is wired up.
     """
+    # ASHAScheduler = Asynchronous Successive Halving Algorithm (a Hyperband variant).
+    # Trials that don't improve within grace_period epochs are stopped early,
+    # freeing resources for more promising configs. reduction_factor=2 means
+    # each "rung" keeps half the trials from the previous rung.
     scheduler = ASHAScheduler(
         metric="loss",
         mode="min",
@@ -907,12 +934,12 @@ def hyperband_search(
     )
 
     tuner = tune.Tuner(
-        tune.with_resources(train_fn, resources={"gpu": 1}),
+        tune.with_resources(train_fn, resources={"gpu": 1}),  # 1 GPU per trial
         param_space=config_space,
         tune_config=tune.TuneConfig(
             num_samples=n_samples,
             scheduler=scheduler,
-            max_concurrent_trials=1,
+            max_concurrent_trials=1,  # one at a time on Quest single-node
         ),
     )
 
@@ -947,13 +974,15 @@ class LoRALinear(nn.Module):
         in_features = linear.in_features
         out_features = linear.out_features
 
+        # A is initialized with Kaiming uniform (non-zero) so the adapter starts with
+        # a meaningful gradient signal. B is initialized to zero so the net LoRA delta
+        # ΔW = B @ A starts at zero — the model begins fine-tuning as if no adapter exists.
         self.lora_A = nn.Parameter(torch.empty(rank, in_features))
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
-
         self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
-        pass
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Base frozen output + low-rank delta, scaled by alpha/rank
         return (self.linear(x) + (x @ self.lora_A.T @ self.lora_B.T) * self.scale)
 
 
@@ -1290,19 +1319,28 @@ def generate_story(
     
     for _ in range(max_new_tokens):
         input_ids = torch.tensor(token_ids, dtype=torch.long).unsqueeze(0).to(device)
+        # Slide a window over the last context_len tokens if the sequence grows too long
         if input_ids.shape[1] > model.context_len:
             input_ids = input_ids[:, -model.context_len:]
-        
+
+        # Forward pass — only need the logits for the very last position
         logits = model(input_ids)[0][0, -1, :]
+
+        # Temperature scaling: divide logits before softmax.
+        # Low temperature → sharper distribution (more deterministic),
+        # high temperature → flatter distribution (more creative/random)
         temp_logs = logits / temperature
-        
+
+        # Top-k masking: zero out all but the k most likely tokens to avoid
+        # sampling from the long tail of nonsense tokens
         top_k_vals, _ = torch.topk(temp_logs, top_k)
         temp_logs[temp_logs < top_k_vals[-1]] = float('-inf')
         probs = torch.softmax(temp_logs, dim=-1)
         next_token = torch.multinomial(probs, num_samples=1).item()
-        
+
         token_ids.append(next_token)
-    
+
+    # Slice off the prompt tokens to return only the newly generated text
     prompt_len = len(tokenizer.encode(generation_prompt).ids)
     decoded_tokens = tokenizer.decode(token_ids[prompt_len:])
 
